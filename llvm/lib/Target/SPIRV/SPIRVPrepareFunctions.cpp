@@ -30,7 +30,6 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
-#include <charconv>
 #include <regex>
 
 using namespace llvm;
@@ -190,6 +189,24 @@ static std::string getAnnotation(Value *AnnoVal, Value *OptAnnoVal) {
   return Anno;
 }
 
+static bool tryParseInt32(const std::string &Str, int32_t &Val) {
+  if (Str.empty())
+    return false;
+
+  int64_t Accum = 0;
+  for (char C : Str) {
+    if (C < '0' || C > '9')
+      return false;
+
+    Accum = Accum * 10 + (C - '0');
+    if (Accum > std::numeric_limits<int32_t>::max())
+      return false;
+  }
+
+  Val = static_cast<int32_t>(Accum);
+  return true;
+}
+
 static SmallVector<Metadata *> parseAnnotation(Value *I,
                                                const std::string &Anno,
                                                LLVMContext &Ctx,
@@ -214,35 +231,46 @@ static SmallVector<Metadata *> parseAnnotation(Value *I,
     for (std::size_t i = 1; i < Match.size(); ++i) {
       std::ssub_match SMatch = Match[i];
       std::string Item = SMatch.str();
-      if (Item.length() == 0)
+      if (Item.empty())
         break;
-      if (Item[0] == '"') {
-        Item = Item.substr(1, Item.length() - 2);
+
+      if (Item.front() == '"') {
+        Item = Item.substr(1, Item.size() - 2);
+
         // Acceptable format of the string snippet is:
         static const std::regex RStr("^(\\d+)(?:,(\\d+))*$");
-        if (std::smatch MatchStr; std::regex_match(Item, MatchStr, RStr)) {
-          for (std::size_t SubIdx = 1; SubIdx < MatchStr.size(); ++SubIdx)
-            if (std::string SubStr = MatchStr[SubIdx].str(); SubStr.length())
-              MDsItem.push_back(ConstantAsMetadata::get(
-                  ConstantInt::get(Int32Ty, std::stoi(SubStr))));
+        std::smatch MatchStr;
+        if (std::regex_match(Item, MatchStr, RStr)) {
+          for (std::size_t SubIdx = 1; SubIdx < MatchStr.size(); ++SubIdx) {
+            std::string SubStr = MatchStr[SubIdx].str();
+            if (!SubStr.empty()) {
+              int32_t NumVal;
+              if (tryParseInt32(SubStr, NumVal)) {
+                MDsItem.push_back(
+                    ConstantAsMetadata::get(ConstantInt::get(Int32Ty, NumVal)));
+              } else {
+                MDsItem.push_back(MDString::get(Ctx, SubStr));
+              }
+            }
+          }
         } else {
           MDsItem.push_back(MDString::get(Ctx, Item));
         }
-      } else if (int32_t Num;
-                 std::from_chars(Item.data(), Item.data() + Item.size(), Num)
-                     .ec == std::errc{}) {
-        MDsItem.push_back(
-            ConstantAsMetadata::get(ConstantInt::get(Int32Ty, Num)));
       } else {
-        MDsItem.push_back(MDString::get(Ctx, Item));
+        int32_t NumVal;
+        if (tryParseInt32(Item, NumVal)) {
+          MDsItem.push_back(
+              ConstantAsMetadata::get(ConstantInt::get(Int32Ty, NumVal)));
+        } else {
+          MDsItem.push_back(MDString::get(Ctx, Item));
+        }
       }
     }
-    if (MDsItem.size() == 0)
+    if (MDsItem.empty())
       return SmallVector<Metadata *>{};
     MDs.push_back(MDNode::get(Ctx, MDsItem));
   }
-  return Pos == static_cast<int>(Anno.length()) ? MDs
-                                                : SmallVector<Metadata *>{};
+  return Pos == static_cast<int>(Anno.size()) ? MDs : SmallVector<Metadata *>{};
 }
 
 static void lowerPtrAnnotation(IntrinsicInst *II) {
