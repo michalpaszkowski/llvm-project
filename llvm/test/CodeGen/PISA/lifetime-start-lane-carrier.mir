@@ -1,0 +1,92 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# POSITIVE: a vector-lane carrier. The marked register R (=%0) has a single real
+# def that is a FORWARDING `extract` of lane 0 from a vector %2 freshly produced
+# each iteration by a non-forwarding load. R is then routed through a forwarding
+# `insert`/`extract` round-trip before reaching a real observation U:
+#
+#   bb.2 (header): %2 = ld_global_v2i32 ...   ; fresh vector each iteration
+#                  goto.cond %8 -> bb.4        ; %8 skips the extract block bb.3
+#   bb.3 (def):    %0 = extract_0 %2           ; D: forwarding def of R
+#   bb.4 (merge):  goto.cond %8 -> bb.6        ; %8 skips the observation block bb.5
+#   bb.5 (obs):    %20 = insert_0 %20, %0      ; forwarding lane carrier
+#                  %21 = extract_0 %20         ; forwarding
+#                  %10 = iadd %21, %1          ; U: real observation
+#
+# R is a fresh lane of the just-loaded %2 and D runs before U on the shared %8 guard.
+
+# CHECK-LABEL: name: lane_carrier
+# CHECK: %0:reg32b = lifetime_start_i32_r
+---
+name:            lane_carrier
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 2,  class: regv2_32b }
+  - { id: 3,  class: reg64b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 20, class: regv2_32b }
+  - { id: 21, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %3:reg64b = functionParameter_i64 1
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader; also seeds the lane-carrier accumulator %20 with a real
+    ; (non-IMPLICIT_DEF) value so %20 is never a marker candidate.
+    successors: %bb.2
+    %20:regv2_32b = ld_global_v2i32_ri %3, 8, 0
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %2 freshly loaded (non-forwarding) each iteration; dominates the
+    ; whole body. %8 guards the extract block bb.3.
+    successors: %bb.4, %bb.3
+    %2:regv2_32b = ld_global_v2i32_ri %3, 0, 0
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; FORWARDING def of %0: lane 0 of the fresh vector. Guard (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = extract_0_i32_v2i32_r %2
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; merge. SAME predicate %8 guards the observation block bb.5.
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; lane-carrier round-trip then a real observation. %0 is upward-exposed here
+    ; (reachable via bb.2 -> bb.4 -> bb.5 without the extract) -> back-edge-live.
+    successors: %bb.6
+    %20:regv2_32b = insert_0_v2i32_i32_r %20:regv2_32b, %0
+    %21:reg32b = extract_0_i32_v2i32_r %20
+    %10:reg32b = iadd_32b_rr %21, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...

@@ -1,0 +1,194 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# These two tests document a KNOWN-MISSING optimization.
+#
+# The guard-containment cover in hasTransitiveControlDependence proves a use U of
+# candidate %0 is always preceded by a real def D in the same iteration by
+# comparing the PREDICATE GUARDS of D and U. A guard is keyed by
+# predKey(vreg, polarity) -- i.e. by the VREG that holds the predicate, NOT by the
+# VALUE that vreg tests.
+#
+# The committed safety fix refuses a guard whose predicate vreg has more than one
+# reaching def (!MRI->hasOneDef(P)), because in this non-SSA (post-PHIElim /
+# coalescing) MIR the same vreg can hold different values at different branch
+# sites. That closes a miscompile but is CONSERVATIVE: it also rejects the two
+# shapes below, where marking %0 is actually sound.
+#
+# Both shapes share the skeleton of lifetime-start-shared-guard-positive.mir
+# (def block bb.3 and use block bb.5 guarded by "the same" predicate); the missing
+# piece is that the guard must be keyed on the TESTED VALUE, not the vreg:
+#
+#   - Q1: one vreg %8, defined TWICE by the SAME pure compare -> !hasOneDef(%8) ->
+#         rejected by the multi-def guard.
+#   - Q2: two DIFFERENT vregs %8 / %11 holding the SAME pure compare -> both
+#         single-def, so the fix does not fire, but the keys (%8) and (%11) differ
+#         -> CD not-contained-in CU -> rejected by the original vreg-identity key.
+#
+# The fix (PROBLEM-PREDS.md sec 3) keys a guard on (compare-opcode, operand
+# value-ids, polarity) for pure compares over single-def / immediate operands, so
+# both branches resolve to the same key and the containment holds.
+
+
+# ---------------------------------------------------------------------------
+# Q1 -- same condition, same vreg, two defs.
+#
+# %8 = ucmp_ne %1, 0 is computed in bb.2 (guards the def block bb.3) AND recomputed
+# identically in bb.4 (guards the use block bb.5). The two %8 values are equal at
+# runtime because operand %1 is a single-def parameter, so the containment is
+# sound -- but hasOneDef(%8) is false, so the pass rejects it today.
+#
+# WHY A MARKER WOULD BE SOUND:
+#   When U (bb.5) runs, bb.4's branch fell through on ucmp_ne(%1,0)==false. The def
+#   guard has the SAME tested value, so bb.2's branch tested the same false and
+#   also fell through -> D (bb.3) ran this iteration. U therefore observes this
+#   iteration's freshly-produced value, never the dead carried-in value the marker
+#   discards -> marking %0 dead at the header is SOUND.
+
+# TODO: mark %0
+
+# CHECK-LABEL: name: q1_same_cond_same_vreg
+# CHECK-NOT: lifetime_start
+---
+name:            q1_same_cond_same_vreg
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header).
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. FIRST def of %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; %8 REDEFINED by the SAME compare, then guards the use block bb.5.
+    successors: %bb.6, %bb.5
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, upward-exposed (reachable via bb.2 -> bb.4 -> bb.5
+    ; without the def) -> back-edge-live.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...
+
+# ---------------------------------------------------------------------------
+# Q2 -- same condition, two different vregs.
+#
+# The def guard (%8, bb.2) and the use guard (%11, bb.4) are DIFFERENT vregs, but
+# both are the SAME pure compare `ucmp_ne %1, 0` (operand %1 single-def), so they
+# test the same value. Both are single-def, so the multi-def reject does NOT fire;
+# instead the ORIGINAL vreg-identity key comparison rejects it because
+# (%8, fall-through) != (%11, fall-through).
+#
+# WHY A MARKER WOULD BE SOUND:
+#   When U (bb.5) runs, bb.4's branch fell through on ucmp_ne(%1,0)==false. The def
+#   guard tests the SAME value, so bb.2 also fell through -> D (bb.3) ran this
+#   iteration. U observes this iteration's fresh value -> marking %0 is SOUND.
+
+# TODO: mark %0
+
+# CHECK-LABEL: name: q2_same_cond_diff_vreg
+# CHECK-NOT: lifetime_start
+---
+name:            q2_same_cond_diff_vreg
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 11, class: pred }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header).
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; a DIFFERENT vreg %11 holding the SAME compare guards the use block bb.5.
+    successors: %bb.6, %bb.5
+    %11:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %11, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, upward-exposed (reachable via bb.2 -> bb.4 -> bb.5
+    ; without the def) -> back-edge-live.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...

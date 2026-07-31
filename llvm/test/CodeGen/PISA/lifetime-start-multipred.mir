@@ -1,0 +1,268 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# Multi-predicate (two-level diamond) guard-containment cover. The first two
+# functions (multipred_positive / multipred_negative) share the same shape: an
+# outer predicate skips the whole def/use region and an inner predicate skips the
+# individual def/use block. They differ ONLY in whether the outer guard of the def
+# matches the outer guard of the use:
+#
+#   H=bb.2 : goto.cond <outer> -> bb.5   ; outer guard skips the def region
+#   bb.3   : goto.cond %8 -> bb.5         ; inner def-skip predicate %8
+#   bb.4   : %0 = iadd ...                ; D: only real def of %0
+#   bb.5   : goto.cond <outer> -> bb.8   ; outer guard skips the use region
+#   bb.6   : goto.cond %8 -> bb.8         ; inner use-skip predicate %8 (== def's)
+#   bb.7   : %10 = iadd %0, %1            ; U: observation of %0
+#   bb.8   : latch
+
+# POSITIVE: D and U share BOTH the outer (%6) and the inner (%8) predicate, so
+# D's guards {%6,%8} are contained in U's guards {%6,%8}. Whenever U runs, D ran
+# first the same iteration -> %0 IS marked. Proves containment does not
+# over-reject legitimately correlated predicate nesting.
+# CHECK-LABEL: name: multipred_positive
+# CHECK-COUNT-1: %0:reg32b = lifetime_start_i32_r
+# CHECK-NOT: lifetime_start
+---
+name:            multipred_positive
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 6,  class: pred }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %6 outer guard skipping the def region.
+    successors: %bb.5, %bb.3
+    %6:pred = ucmp_ne_32b_pri %1, 0
+    %8:pred = ucmp_ne_32b_pri %1, 1
+    predgoto 0, %6, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; inner def-skip guard %8.
+    successors: %bb.5, %bb.4
+    predgoto 0, %8, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; D: only real def of %0, guarded by (%6 fall-through, %8 fall-through).
+    successors: %bb.5
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; %6 outer guard skipping the use region -- SAME predicate as the def's.
+    successors: %bb.8, %bb.6
+    predgoto 0, %6, %bb.8, implicit-def dead $specialreg_activemask
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; inner use-skip guard %8 -- SAME predicate as the def's inner guard.
+    successors: %bb.8, %bb.7
+    predgoto 0, %8, %bb.8, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; U: observation of %0 under (%6 fall-through, %8 fall-through).
+    successors: %bb.8
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.8, implicit-def dead $specialreg_activemask
+
+  bb.8:
+    ; latch
+    successors: %bb.2, %bb.9
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.9, implicit-def dead $specialreg_activemask
+
+  bb.9:
+    retValue_i32_r %1
+...
+
+# NEGATIVE: D and U share the INNER predicate (%8) but sit under DIFFERENT OUTER
+# predicates (%6 guards D, %7 guards U). The path {%6 true (skip D), %7 false,
+# %8 false (run U)} executes U without D, so U reads the back-edge value ->
+# marking %0 is UNSOUND. D's guards {%6,%8} are NOT contained in U's guards
+# {%7,%8}, so the guard-containment cover rejects it. (A mere shared-inner-
+# predicate intersection would wrongly accept.)
+# CHECK-LABEL: name: multipred_negative
+# CHECK-NOT: lifetime_start
+---
+name:            multipred_negative
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 6,  class: pred }
+  - { id: 7,  class: pred }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %6 outer guard skipping the def region.
+    successors: %bb.5, %bb.3
+    %6:pred = ucmp_ne_32b_pri %1, 0
+    %7:pred = scmp_lt_32b_pri %1, 0
+    %8:pred = ucmp_ne_32b_pri %1, 1
+    predgoto 0, %6, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; inner def-skip guard %8.
+    successors: %bb.5, %bb.4
+    predgoto 0, %8, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; D: only real def of %0, guarded by (%6 fall-through, %8 fall-through).
+    successors: %bb.5
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; %7 outer guard skipping the use region -- DIFFERENT predicate from %6.
+    successors: %bb.8, %bb.6
+    predgoto 0, %7, %bb.8, implicit-def dead $specialreg_activemask
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; inner use-skip guard %8 -- SAME predicate as the def's inner guard.
+    successors: %bb.8, %bb.7
+    predgoto 0, %8, %bb.8, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; U: observation of %0 under (%7 fall-through, %8 fall-through).
+    successors: %bb.8
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.8, implicit-def dead $specialreg_activemask
+
+  bb.8:
+    ; latch
+    successors: %bb.2, %bb.9
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.9, implicit-def dead $specialreg_activemask
+
+  bb.9:
+    retValue_i32_r %1
+...
+
+# Negative test:
+#
+#   loop_header:
+#     if (cond1)            ; cond1 = %6
+#       if (cond2)          ; cond2 = %8
+#         A =               ; D: def of %0 (= A), nested under BOTH %6 and %8
+#     if (cond2)            ; cond2 = %8 (same predicate, reached unconditionally)
+#       = A                 ; U: use of %0, guarded by %8 ONLY
+#   goto loop_header
+#
+# On the path where cond1 is not satisfied (the whole def region is skipped)
+# but cond2 is satisfied for the use, U runs WITHOUT D and reads the loop-carried
+# value, so %0 must not be marked dead.
+
+# CHECK-LABEL: name: multipred_nested_def_negative
+# CHECK-NOT: lifetime_start
+---
+name:            multipred_nested_def_negative
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 6,  class: pred }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header / loop_header. cond1 = %6 (outer def guard), cond2 = %8.
+    ; if(cond1): %6 true skips the WHOLE def region -> bb.5 (the second `if`).
+    successors: %bb.5, %bb.3
+    %6:pred = ucmp_ne_32b_pri %1, 0
+    %8:pred = ucmp_ne_32b_pri %1, 1
+    predgoto 0, %6, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; inner def guard if(cond2): %8 true skips the def block -> bb.5.
+    successors: %bb.5, %bb.4
+    predgoto 0, %8, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; D: the only real def of %0 (= A), guarded by (%6 fall-through, %8 fall-through).
+    successors: %bb.5
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; the second `if (cond2)` -- reached on EVERY path (NOT under cond1). %8 true
+    ; skips the use block -> bb.7 (latch).
+    successors: %bb.7, %bb.6
+    predgoto 0, %8, %bb.7, implicit-def dead $specialreg_activemask
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; U: observation of %0 (= A), guarded by %8 ONLY (no outer %6 guard).
+    successors: %bb.7
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; latch
+    successors: %bb.2, %bb.8
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.8, implicit-def dead $specialreg_activemask
+
+  bb.8:
+    retValue_i32_r %1
+...

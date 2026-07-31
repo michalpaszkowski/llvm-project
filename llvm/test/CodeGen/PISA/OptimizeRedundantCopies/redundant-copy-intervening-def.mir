@@ -1,0 +1,34 @@
+# RUN: llc -march=pisa -run-pass=pisa-optimize-redundant-copies %s -o - | FileCheck %s
+
+---
+name:            test_reg
+body: |
+  bb.0:
+    %0:reg64b = IMPLICIT_DEF
+    %1:reg64b = IMPLICIT_DEF
+    %2:reg64b = IMPLICIT_DEF
+    ; This test verifies that the PISAOptimizeRedundantCopies pass does NOT incorrectly propagate a redefined register through a copy chain.
+    ; Specifically, after %2 is copied to %3 and then redefined, the final copy to %4 must use %3 as its source, NOT the redefined %2.
+    ; CHECK: [[FIRST_COPIED_VALUE:%[0-9]+]]:reg64b = COPY %2
+    ; CHECK: %2:reg64b = IMPLICIT_DEF
+    ; CHECK: [[SECOND_COPIED_VALUE:%[0-9]+]]:reg64b = COPY [[FIRST_COPIED_VALUE]]
+    %3:reg64b = COPY %2:reg64b
+    %2:reg64b = IMPLICIT_DEF
+    %4:reg64b = COPY %3:reg64b
+
+---
+name:            test_subreg
+tracksRegLiveness: true
+body: |
+  bb.0:
+    %0:reg32b = IMPLICIT_DEF
+    %1:regv4_32b = IMPLICIT_DEF
+    %2:regv4_32b = IMPLICIT_DEF
+    ; This test verifies that the PISAOptimizeRedundantCopies pass does NOT incorrectly propagate a redefined subregister through a copy chain.
+    ; Specifically, after %2 is copied to %3 and then a subregister of %2 is redefined, the final copy to %4 must use %3 as its source, NOT the redefined %2.
+    ; CHECK: [[FIRST_COPIED_VALUE:%[0-9]+]]:regv4_32b = COPY %2
+    ; CHECK: %2.sub32_1:regv4_32b = IMPLICIT_DEF
+    ; CHECK: [[SECOND_COPIED_VALUE:%[0-9]+]]:regv4_32b = COPY [[FIRST_COPIED_VALUE]]
+    %3:regv4_32b = COPY %2:regv4_32b
+    %2.sub32_1:regv4_32b = IMPLICIT_DEF
+    %4:regv4_32b = COPY %3:regv4_32b

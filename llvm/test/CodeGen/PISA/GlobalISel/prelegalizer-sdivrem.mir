@@ -1,0 +1,39 @@
+# RUN: llc -march=pisa -run-pass=pisa-prelegalizer-combiner -verify-machineinstrs %s -o -   | FileCheck -check-prefix=LEGAL %s
+# RUN: llc -march=pisa -start-before=pisa-prelegalizer-combiner -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define void @test_divrem(i8 %d) {
+    %B2 = srem i8 %d, %d
+    %B3 = sdiv i8 %d, %d
+    store i8 %B2, ptr addrspace(4) null, align 1
+    store i8 %B3, ptr addrspace(4) null, align 1
+    ret void
+  }
+...
+---
+name:            test_divrem
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; LEGAL-LABEL: {{^}}name: test_divrem
+    ; ASM-LABEL: @test_divrem
+
+    ; LEGAL: [[ARG:%[0-9]+]]:reg8b(i8) = loadParam_i8 0, 0
+    ; LEGAL: [[REM:%[0-9]+]]:_(i8) = G_SREM [[ARG]], [[ARG]]
+    ; LEGAL: [[DIV:%[0-9]+]]:_(i8) = G_SDIV [[ARG]], [[ARG]]
+    ; LEGAL: G_STORE [[REM]]
+    ; LEGAL: G_STORE [[DIV]]
+
+    ; ASM: sext.16b.8b [[ARG:%h[0-9]+]], %b0
+    ; ASM: sdiv.rem.16b [[REM:%h[0-9]+]], [[ARG]], [[ARG]]
+    ; ASM: trunc.8b.16b [[TREM:%b[0-9]+]], [[REM]]
+    ; ASM: sdiv.quo.16b [[DIV:%h[0-9]+]], [[ARG]], [[ARG]]
+    ; ASM: trunc.8b.16b [[TDIV:%b[0-9]+]], [[DIV]]
+
+    %0:reg8b(i8) = loadParam_i8 0, 0
+    %3:_(p4) = G_CONSTANT i32 0
+    %1:_(i8) = G_SREM %0:reg8b, %0:reg8b
+    %2:_(i8) = G_SDIV %0:reg8b, %0:reg8b
+    G_STORE %1:_(i8), %3:_(p4) :: (store (i8) into `ptr addrspace(4) null`)
+    G_STORE %2:_(i8), %3:_(p4) :: (store (i8) into `ptr addrspace(4) null`)
+    ret
+...

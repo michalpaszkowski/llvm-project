@@ -1,0 +1,31 @@
+# RUN: llc -march=pisa -run-pass=postrapseudos -verify-machineinstrs %s -o -   | FileCheck -check-prefix=PSEUDO %s
+# RUN: llc -march=pisa -start-before=postrapseudos -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define i32 @test_copy_v3(i32 %arg) {
+    ret i32 %arg
+  }
+...
+---
+name:            test_copy_v3
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; PSEUDO-LABEL: {{^}}name: test_copy_v3
+    ; ASM-LABEL: @test_copy_v3
+    ; PSEUDO: undef %v3.sub32_0:regv3_32b = mov_i32_r %0
+    ; PSEUDO: %v3.sub32_1:regv3_32b = mov_i32_r %0
+    ; PSEUDO: %v3.sub32_2:regv3_32b = mov_i32_r %0
+    ; PSEUDO: %v2:regv2_32b = mov_v2i32_r %v3.sub32_xy
+    ; ASM: mov.32b [[REG:%v3w[0-9]+]].x, %w0
+    ; ASM: mov.32b [[REG]].y, %w0
+    ; ASM: mov.64b [[REGO:%v2w[0-9]+]].xy, [[REG]].xy
+    %0:reg32b(i32) = functionParameter_i32 0
+    undef %v3.sub32_0:regv3_32b = COPY %0:reg32b
+    %v3.sub32_1:regv3_32b = COPY %0:reg32b
+    %v3.sub32_2:regv3_32b = COPY %0:reg32b
+    %v2:regv2_32b = COPY %v3.sub32_xy:regv3_32b
+    retValue_i32_r %0:reg32b(i32)
+
+...

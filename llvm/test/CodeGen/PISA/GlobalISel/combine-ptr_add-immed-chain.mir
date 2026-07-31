@@ -1,0 +1,44 @@
+# RUN: llc -march=pisa -run-pass=pisa-postlegalizer-combiner -verify-machineinstrs %s -o -   | FileCheck -check-prefix=COMBINER %s
+# RUN: llc -march=pisa -start-before=pisa-postlegalizer-combiner -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+
+--- |
+  target datalayout = "e-p:32:32-p1:64:64-p2:64:64-p3:32:32-p4:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-n16:32-G1"
+  target triple = "pisa"
+
+  %"struct.user_def_types::no_cnstr" = type { float, i32, i8 }
+
+  define weak_odr pisa_kernel void @kernelIN14(ptr addrspace(2) byref(%"struct.user_def_types::no_cnstr") align 4 %src, ptr addrspace(1) %dst) {
+  entry:
+    %0 = getelementptr inbounds i8, ptr addrspace(2) %src, i64 9
+    tail call void @llvm.memcpy.p1.p2.i64(ptr addrspace(1) align 2 %dst, ptr addrspace(2) align 2 dereferenceable(3) %0, i64 3, i1 false)
+    ret void
+  }
+
+  declare void @llvm.memcpy.p1.p2.i64(ptr addrspace(1) noalias nocapture writeonly, ptr addrspace(2) noalias nocapture readonly, i64, i1 immarg) #0
+
+  attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+
+...
+---
+name:            kernelIN14
+legalized:       true
+tracksRegLiveness: true
+body:             |
+  bb.1.entry:
+    %0:_(p2) = G_PISA_PARAM_SLOT 0, 0
+    %1:reg64b(p1) = loadParam_i64 1, 0
+    %2:_(i64) = G_CONSTANT i64 9
+    %3:_(p2) = nuw G_PTR_ADD %0, %2(i64)
+    %5:_(<2 x i8>) = G_LOAD %3(p2) :: (dereferenceable invariant load (i16) from %ir.0, align 2, addrspace 2)
+    G_STORE %5(<2 x i8>), %1(p1) :: (store (i16) into %ir.dst, align 2, addrspace 1)
+    ; COMBINER: [[C:%[0-9]+]]:_(i64) = G_CONSTANT i64 11
+    ; COMBINER: %{{[0-9]+}}:_(p2) = G_PTR_ADD %0, [[C]](i64)
+    ; ASM: ld.param.8b %b{{[0-9]+}}, [%arg0+11];
+    %6:_(i64) = G_CONSTANT i64 2
+    %7:_(p2) = G_PTR_ADD %3, %6(i64)
+    %8:_(i8) = G_LOAD %7(p2) :: (dereferenceable invariant load (i8) from %ir.0 + 2, addrspace 2)
+    %9:_(p1) = G_PTR_ADD %1, %6(i64)
+    G_STORE %8(i8), %9(p1) :: (store (i8) into %ir.dst + 2, addrspace 1)
+    ret
+
+...

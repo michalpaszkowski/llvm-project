@@ -1,0 +1,30 @@
+# RUN: llc -march=pisa -run-pass=pisa-legalize-subreg-access -verify-machineinstrs %s -o - | FileCheck %s
+--- |
+  define void @test_large_vector_copy() {
+    ret void
+  }
+...
+---
+name:            test_large_vector_copy
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    %zero_val:reg32b = mov_i32_i 0
+
+    %vec:regv8_32b = insert_0_v8i32_i32_r undef %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_1_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_2_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_3_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_4_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_5_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_6_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+    %vec:regv8_32b = insert_7_v8i32_i32_r %vec:regv8_32b, %zero_val:reg32b
+
+    ; CHECK-LABEL: {{^}}name: test_large_vector_copy
+    ; CHECK-NOT: %vec_copy:regv8_32b = IMPLICIT_DEF
+    ; CHECK:  %vec_copy:regv8_32b = extract_0_v8i32_v8i32_r %vec
+
+    %vec_copy:regv8_32b = COPY %vec:regv8_32b
+...

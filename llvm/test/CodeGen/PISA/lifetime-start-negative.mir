@@ -1,0 +1,681 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# Three registers, each rejected for a different reason; the headline case is %0,
+# which exercises the per-use control-dependence filter.
+#
+#   %0  : IMPLICIT_DEF + back-edge-live (the candidate signal). %0 is read in
+#         bb.2, forwarded to %2, and OBSERVED by `iadd %2, %1` in bb.2 -- control-
+#         dependent on (%8,true). But %0's only real def (`%0 = COPY %1`) is in
+#         bb.5, control-dependent on (%9,true) -- a DIFFERENT predicate, and bb.5
+#         does not dominate the observation.
+#   %20 : IMPLICIT_DEF, but redefined in bb.1 before any upward-exposed use -> not
+#         live-in to the header -> not back-edge-live -> not marked.
+#   %21 : a real pre-header def (functionParameter), no IMPLICIT_DEF -> not marked.
+
+# CHECK-LABEL: name: negative_multi_pred
+# CHECK-NOT: lifetime_start
+---
+name:            negative_multi_pred
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0, class: reg32b }
+  - { id: 1, class: reg32b }
+  - { id: 2, class: reg32b }
+  - { id: 3, class: reg32b }
+  - { id: 4, class: reg8b }
+  - { id: 5, class: reg16b }
+  - { id: 6, class: reg16b }
+  - { id: 7, class: reg16b }
+  - { id: 8, class: pred }
+  - { id: 9, class: pred }
+  - { id: 20, class: reg32b }
+  - { id: 21, class: reg32b }
+  - { id: 22, class: reg32b }
+  - { id: 23, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %21:reg32b = functionParameter_i32 2
+    %4:reg8b = functionParameter_i8 1
+    %0:reg32b = IMPLICIT_DEF
+    %20:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2, %bb.3
+    %5:reg16b = zext_16b_8b_r %4
+    %6:reg16b = not_16b_r %5
+    %7:reg16b = and_16b_ri %6, 1
+    %8:pred = ucmp_ne_16b_pri %7, 0
+    %9:pred = ucmp_ne_16b_pri %7, 1
+    ; %20 redefined before any use -> not upward-exposed -> not back-edge-live.
+    %20:reg32b = COPY %1
+    %22:reg32b = COPY %20
+    predgoto 0, %8, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.4
+    ; control-dependent on (%8, true). %0 read upward-exposed here, forwarded to
+    ; %2 and OBSERVED by iadd under (%8,true) -- but %0's def is under (%9,true).
+    %2:reg32b = COPY %0
+    %23:reg32b = iadd_32b_rr %2, %1
+    ; %21 read upward-exposed -> back-edge-live, but it has no IMPLICIT_DEF.
+    %3:reg32b = COPY %21
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.5, %bb.4
+    predgoto 0, %9, %bb.5, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    successors: %bb.4
+    ; control-dependent on (%9, true) -- a DIFFERENT predicate from bb.2.
+    %0:reg32b = COPY %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    successors: %bb.1, %bb.6
+    ; Latch: %0 and %21 are live-out across the back-edge to the header.
+    predgoto 0, %8, %bb.1, implicit-def dead $specialreg_activemask
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    retValue_i32_r %1
+...
+
+# NEGATIVE: register R (=%0) is rejected because R also has a real
+# (non-IMPLICIT_DEF) def in the unique preheader bb.1 (`%0 = COPY %1`) that
+# dominates the header -- a live value enters the loop, so "dead at the header"
+
+# would drop it. R MUST NOT be marked.
+# CHECK-LABEL: name: real_preheader_def
+# CHECK-NOT: lifetime_start
+---
+name:            real_preheader_def
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader. A REAL def of %0 dominates the header -> the live value
+    ; entering the loop, the sole reason %0 is rejected.
+    successors: %bb.2
+    %0:reg32b = COPY %1
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; in-loop real def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; merge. The SAME predicate %8 guards the observation block bb.5.
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, same guard (%8, fall-through); upward-exposed here
+    ; (reachable via bb.2 -> bb.4 -> bb.5 without the def) -> back-edge-live.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...
+
+# NEGATIVE isolating the live-out gate. The register R (=%0) is IMPLICIT_DEF-seeded,
+# back-edge-live, read and redefined in the loop body -- but R ITSELF is read AFTER
+# the loop (`retValue_i32_r %0` in the exit bb.4).
+
+# CHECK-LABEL: name: liveout_reject
+# CHECK-NOT: lifetime_start
+---
+name:            liveout_reject
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0, class: reg32b }
+  - { id: 1, class: reg32b }
+  - { id: 2, class: reg32b }
+  - { id: 4, class: reg8b }
+  - { id: 5, class: reg16b }
+  - { id: 6, class: reg16b }
+  - { id: 7, class: reg16b }
+  - { id: 8, class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %4:reg8b = functionParameter_i8 1
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2, %bb.3
+    ; The loop's single predicate %8.
+    %5:reg16b = zext_16b_8b_r %4
+    %6:reg16b = not_16b_r %5
+    %7:reg16b = and_16b_ri %6, 1
+    %8:pred = ucmp_ne_16b_pri %7, 0
+    predgoto 0, %8, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.3
+    ; %0 read upward-exposed (back-edge value), observed, then redefined under
+    ; (%8,true) -- exactly the positive pattern.
+    %2:reg32b = COPY %0
+    %10:reg32b = iadd_32b_rr %2, %1
+    %0:reg32b = COPY %1
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.1, %bb.4
+    ; Latch: same predicate %8 closes the loop, keeping %0 live across the edge.
+    predgoto 0, %8, %bb.1, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; %0 escapes here: its loop-carried exit value is observed after the loop.
+    ; This is what isLiveOutOfLoop(%0) catches -> %0 must NOT be marked.
+    retValue_i32_r %0
+...
+
+# Two functions that detect register R (=%0) repacked out of the loop L by a COPY
+# in the exit block:
+#
+#   repack_after_real -- the copy feeds a REAL use (the returned value), so R's
+#     carried value escapes. The forward walk reaches that use and rejects.
+#   repack_after_dead -- the copy result is DEAD (never really used). The forward
+#     walk never reaches a real observation, so it would NOT reject; only the
+#     live-out gate (isLiveOutOfLoop) rejects R.
+#
+# Both must produce no marker.
+
+# CHECK-LABEL: name: repack_after_real
+# CHECK-NOT: lifetime_start
+---
+name:            repack_after_real
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 30, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+  bb.1:
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+  bb.2:
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+  bb.3:
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+  bb.4:
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+  bb.5:
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+  bb.6:
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+  bb.7:
+    ; repack of %0 out of the loop, then a real use of the copy -> %0 escapes.
+    %30:reg32b = COPY %0
+    retValue_i32_r %30
+...
+
+# CHECK-LABEL: name: repack_after_dead
+# CHECK-NOT: lifetime_start
+---
+name:            repack_after_dead
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 30, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+  bb.1:
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+  bb.2:
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+  bb.3:
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+  bb.4:
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+  bb.5:
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+  bb.6:
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+  bb.7:
+    ; repack of %0 out of the loop, but the copy result %30 is dead; only the
+    ; live-out gate rejects %0 here.
+    %30:reg32b = COPY %0
+    retValue_i32_r %1
+...
+
+# NEGATIVE: escape through a DIFFERENT register. The register R (=%0) is a scalar
+# that carries one lane of a live-out vector %20 across the back-edge:
+#   header bb.1: %20 = insert_4_v8i32_i32_r %20(tied-def 0), %0   ; lane 4 <- R
+#   latch  bb.2: %0  = extract_4_i32_v8i32_r %20                  ; lane 4 -> R
+#   exit   bb.3: retValue_v8i32_r %20                             ; whole vector escapes
+#
+# R ITSELF is NOT live-out of the loop -- only the vector %20 is read after the
+# loop. The escape is visible only by following R forward through the forwarding
+# insert_4 into %20 and seeing %20 observed OUTSIDE the loop.
+
+# CHECK-LABEL: name: escape_carrier_reject
+# CHECK-NOT: lifetime_start
+---
+name:            escape_carrier_reject
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0, class: reg32b }
+  - { id: 1, class: reg32b }
+  - { id: 4, class: reg8b }
+  - { id: 5, class: reg16b }
+  - { id: 6, class: reg16b }
+  - { id: 7, class: reg16b }
+  - { id: 8, class: pred }
+  - { id: 20, class: regv8_32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %4:reg8b = functionParameter_i8 1
+    %5:reg16b = zext_16b_8b_r %4
+    %6:reg16b = not_16b_r %5
+    %7:reg16b = and_16b_ri %6, 1
+    %8:pred = ucmp_ne_16b_pri %7, 0
+    ; Vector lane-carrier seed (undef on entry) -- dominates the header.
+    %0:reg32b = IMPLICIT_DEF
+    ; Vector seed so %20 is fully defined entering the loop.
+    %20:regv8_32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2
+    ; Header: %0 (back-edge value) is written into lane 4 of the live-out vector
+    ; %20 via a forwarding insert -> %0's value flows into %20. (The tie between
+    ; the result and the first source is implied by the instruction.) The loop
+    ; exits ONLY through the latch bb.2, so the latch dominates the exit bb.3.
+    %20:regv8_32b = insert_4_v8i32_i32_r %20:regv8_32b, %0:reg32b
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.1, %bb.3
+    ; Latch: lane 4 is pulled back out into %0 (its only real def, in-loop), then
+    ; carried across the back-edge into the header's insert_4. The latch def of
+    ; %0 dominates the exit bb.3, but the escaping observation below is outside
+    ; the loop, so the forward walk rejects it.
+    %0:reg32b = extract_4_i32_v8i32_r %20:regv8_32b
+    predgoto 0, %8, %bb.1, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; The whole vector %20 (including lane 4, i.e. %0's back-edge value) escapes
+    ; the loop. %0 itself is NOT read here; the forward walk rejects this
+    ; post-loop observation of a value derived from %0.
+    retValue_v8i32_r %20
+...
+
+# NEGATIVE: cross-block def-after-use. The register R (=%0) has a single real def
+# in the latch, AFTER R's carried value has already escaped through a SIBLING
+# register %10 that is observed in-loop:
+#
+#   bb.3:  %10 = mov %0          ; carrier R feeds the sibling %10
+#   bb.4:  %30 = iadd %10, %6    ; U: real observation of the sibling
+#   bb.5:  %0  = mov %10         ; D: the ONLY real def of R (the latch)
+
+# CHECK-LABEL: name: mov_only_carrier
+# CHECK-NOT: lifetime_start
+---
+name:            mov_only_carrier
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg64b }
+  - { id: 1,  class: reg32b }
+  - { id: 2,  class: reg8b }
+  - { id: 3,  class: reg16b }
+  - { id: 4,  class: reg16b }
+  - { id: 5,  class: pred }
+  - { id: 6,  class: reg64b }
+  - { id: 10, class: reg64b }
+  - { id: 20, class: pred }
+  - { id: 21, class: pred }
+  - { id: 30, class: reg64b }
+body:             |
+  bb.0:
+    ; entry: %bb.6 = loop-bypass (straight to exit), %bb.1 = preheader.
+    successors: %bb.6, %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %2:reg8b = functionParameter_i8 1
+    %3:reg16b = zext_16b_8b_r %2
+    %4:reg16b = and_16b_ri %3, 1
+    ; Outer loop-entry guard. Because bb.0 can bypass the loop, every in-loop
+    ; block is control-dependent on (%5, false) -- the spurious shared guard that
+    ; let the pre-fix cover succeed.
+    %5:pred = ucmp_ne_16b_pri %4, 0
+    predgoto 0, %5, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header): seeds the carrier undef and
+    ; the sibling's init constant.
+    successors: %bb.2
+    %0:reg64b = IMPLICIT_DEF
+    %6:reg64b = mov_i64_i 1
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; loop header. Sibling init on the skip path; %0 read on the bb.3 path.
+    successors: %bb.4, %bb.3
+    %10:reg64b = mov_i64_r %6
+    %20:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %20, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; carrier -> sibling: the ONLY use of %0 is this forwarding mov.
+    successors: %bb.4
+    %10:reg64b = mov_i64_r %0
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; real (non-forwarding) observation of the sibling %10 -- i.e. of %0's
+    ; loop-carried value on the bb.3 path.
+    successors: %bb.5
+    %30:reg64b = iadd_64b_rr %10, %6
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; latch: the ONLY real def of %0 is this forwarding mov of the sibling.
+    successors: %bb.2, %bb.6
+    %0:reg64b = mov_i64_r %10
+    %21:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %21, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    retValue_i32_r %1
+...
+
+# NEGATIVE pair: register R (=%0) has a real def D that runs AFTER its observation
+# U in the same block, so U reads R's loop-carried value. The two functions differ
+# ONLY in D's opcode, showing the rejection is about def/use ORDERING, not whether
+# D is a forwarding op:
+#   def_after_use_real -- D is a non-forwarding `iadd`.
+#   def_after_use_copy -- D is a forwarding `COPY`.
+# In both, bb.2 is:  %2 = COPY %0 (reads the back-edge value); %10 = iadd %2,%1
+# (observes it); %0 = <def> (only now redefined). D after U -> not marked.
+
+# CHECK-LABEL: name: def_after_use_real
+# CHECK-NOT: lifetime_start
+---
+name:            def_after_use_real
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0, class: reg32b }
+  - { id: 1, class: reg32b }
+  - { id: 2, class: reg32b }
+  - { id: 4, class: reg8b }
+  - { id: 5, class: reg16b }
+  - { id: 6, class: reg16b }
+  - { id: 7, class: reg16b }
+  - { id: 8, class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %4:reg8b = functionParameter_i8 1
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2, %bb.3
+    ; The loop's single predicate %8.
+    %5:reg16b = zext_16b_8b_r %4
+    %6:reg16b = not_16b_r %5
+    %7:reg16b = and_16b_ri %6, 1
+    %8:pred = ucmp_ne_16b_pri %7, 0
+    predgoto 0, %8, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.3
+    ; %0 read upward-exposed (the carried value), observed by iadd -- BEFORE %0's
+    ; non-forwarding def, which comes last in the block.
+    %2:reg32b = COPY %0
+    %10:reg32b = iadd_32b_rr %2, %1
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.1, %bb.4
+    ; Latch: the same predicate %8 closes the loop; the back-edge keeps %0 live.
+    predgoto 0, %8, %bb.1, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    retValue_i32_r %1
+...
+
+# CHECK-LABEL: name: def_after_use_copy
+# CHECK-NOT: lifetime_start
+---
+name:            def_after_use_copy
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0, class: reg32b }
+  - { id: 1, class: reg32b }
+  - { id: 2, class: reg32b }
+  - { id: 4, class: reg8b }
+  - { id: 5, class: reg16b }
+  - { id: 6, class: reg16b }
+  - { id: 7, class: reg16b }
+  - { id: 8, class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %4:reg8b = functionParameter_i8 1
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2, %bb.3
+    ; The loop's single predicate %8.
+    %5:reg16b = zext_16b_8b_r %4
+    %6:reg16b = not_16b_r %5
+    %7:reg16b = and_16b_ri %6, 1
+    %8:pred = ucmp_ne_16b_pri %7, 0
+    predgoto 0, %8, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.3
+    ; %0 read upward-exposed (the carried value), forwarded to %2, then observed
+    ; by iadd -- BEFORE %0's only def, which is a forwarding COPY.
+    %2:reg32b = COPY %0
+    %10:reg32b = iadd_32b_rr %2, %1
+    %0:reg32b = COPY %1
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.1, %bb.4
+    ; Latch: the same predicate %8 closes the loop; the back-edge keeps %0 live.
+    predgoto 0, %8, %bb.1, implicit-def dead $specialreg_activemask
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    retValue_i32_r %1
+...
+
+# NEGATIVE: the shared-guard positive shape, but the guard predicate %8 is DEFINED
+# TWICE (two different cmps): bb.2's %8 guards the def bb.3, bb.4's %8 guards the
+# use bb.5. Both guards pack to the same key (%8, fall-through), yet test different
+# values -- with %1 = 5, bb.2 skips D (ne 0 true) while bb.5 runs U (lt 0 false),
+# so U sees the back-edge value. A guard whose predicate vreg has >1 def is not a
+# value identity, so the containment cover rejects it -> R (=%0) MUST NOT be marked.
+
+# CHECK-LABEL: name: multidef_pred_reject
+# CHECK-NOT: lifetime_start
+---
+name:            multidef_pred_reject
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header).
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. FIRST def of %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; %8 REDEFINED by a different cmp, then guards the use block bb.5.
+    successors: %bb.6, %bb.5
+    %8:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, upward-exposed (reachable via bb.2 -> bb.4 -> bb.5
+    ; without the def) -> back-edge-live.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...

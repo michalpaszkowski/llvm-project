@@ -1,0 +1,83 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# POSITIVE: the register R (=%0) is covered through the GUARD-CONTAINMENT branch
+# (not pure dominance). Its real def D and its observation U live in different
+# blocks both guarded by the SAME predicate %8, and D runs BEFORE U on that path:
+#
+#   bb.2 (header): goto.cond %8 -> bb.4   ; %8 true skips the def block bb.3
+#   bb.3 (def):    %0 = iadd %1, %1        ; D: real, non-forwarding, guard (%8,fall-through)
+#   bb.4 (merge):  goto.cond %8 -> bb.6   ; %8 true skips the observation block bb.5
+#   bb.5 (obs):    %10 = iadd %0, %1       ; U: observation, SAME guard (%8,fall-through)
+#
+# D's block bb.3 does NOT dominate U's block bb.5 (bb.5 is also reachable via
+# bb.2 -> bb.4 -> bb.5, bypassing bb.3), so dominance alone does not cover U. But
+# D's guards are contained in U's guards and D runs first on the guarded path, so
+# U sees this iteration's value, never the back-edge value -> R IS marked. This
+# is the single-predicate shape the guard cover must keep accepting. %0 is the
+# only IMPLICIT_DEF candidate, so the post-marker CHECK-NOT is exact.
+
+# CHECK-LABEL: name: shared_guard_positive
+# CHECK-COUNT-1: %0:reg32b = lifetime_start_i32_r
+# CHECK-NOT: lifetime_start
+---
+name:            shared_guard_positive
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header).
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real NON-forwarding def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; merge. The SAME predicate %8 guards the observation block bb.5.
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, same guard (%8, fall-through). %0 is upward-exposed here
+    ; (reachable via bb.2 -> bb.4 -> bb.5 without the def) -> back-edge-live.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    retValue_i32_r %1
+...

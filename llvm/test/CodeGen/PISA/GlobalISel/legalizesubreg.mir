@@ -1,0 +1,127 @@
+# RUN: llc -march=pisa -run-pass=pisa-legalize-subreg-access -verify-machineinstrs %s -o -   | FileCheck -check-prefix=PSEUDO %s
+# RUN: llc -march=pisa -start-before=pisa-legalize-subreg-access -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define i32 @test_copy_case1(i32 %arg) {
+    ret i32 %arg
+  }
+  define i32 @test_copy_case2(i32 %arg) {
+    ret i32 %arg
+  }
+  define i32 @test_copy_case3(i32 %arg) {
+    ret i32 %arg
+  }
+  define i32 @test_copy_v3i32_to_v3i32(i32 %arg) {
+    ret i32 %arg
+  }
+  define i32 @test_copy_v3i32_noop(i32 %arg) {
+    ret i32 %arg
+  }
+...
+---
+name:            test_copy_case1
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; PSEUDO-LABEL: {{^}}name: test_copy_case1
+    ; PSEUDO:     %0:regv4_64b = functionParameter_v4i64 0
+    ; PSEUDO:     %v:regv4_32b = COPY %0.sub64_xy
+    ; PSEUDO:     %v:regv4_32b = COPY %0.sub64_xy
+    ; PSEUDO:     %rv:reg32b(i32) = COPY %v.sub32_0
+    ; PSEUDO:     retValue_i32_r %rv(i32)
+    ;
+    ; ASM-LABEL: @test_copy_case1
+    ; ASM:        mov.128b [[DST:%v4w[0-9]+]].xyzw, [[LO:%v4d[0-9]+]].xy
+    %0:regv4_64b = functionParameter_v4i64 0
+    %v:regv4_32b = COPY %0.sub64_xy:regv4_64b
+    %v:regv4_32b = COPY %0.sub64_xy:regv4_64b ; trick MIR parser into not SSA
+    %rv:reg32b(i32) = COPY %v.sub32_0:regv4_32b
+    retValue_i32_r %rv(i32)
+...
+---
+name:            test_copy_case2
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; PSEUDO-LABEL: {{^}}name: test_copy_case2
+    ; PSEUDO:     %0:regv4_32b = functionParameter_v4i32 0
+    ; PSEUDO:     %v:regv2_64b = COPY %0
+    ; PSEUDO:     %v:regv2_64b = COPY %0
+    ; PSEUDO:     %x:regv2_32b = COPY %v.sub64_0
+    ; PSEUDO:     %rv:reg32b(i32) = COPY %x.sub32_0
+    ; PSEUDO:     retValue_i32_r %rv(i32)
+    ;
+    ; ASM-LABEL: @test_copy_case2
+    ; ASM:        mov.128b [[V2R64:%v2d[0-9]+]].xy, [[SRC:%v4w[0-9]+]].xyzw
+    ; ASM:        mov.64b  [[V2R32:%v2w[0-9]+]].xy, [[V2R64:%v2d[0-9]+]].x
+    ; ASM:        mov.32b [[R32:%w[0-9]+]], [[V2R32:%v2w[0-9]+]].x
+    %0:regv4_32b = functionParameter_v4i32 0
+    %v:regv2_64b = COPY %0:regv4_32b
+    %v:regv2_64b = COPY %0:regv4_32b ; trick MIR parser into not SSA
+    %x:regv2_32b = COPY %v.sub64_0:regv2_64b
+    %rv:reg32b(i32) = COPY %x.sub32_0:regv2_32b
+    retValue_i32_r %rv(i32)
+...
+---
+name:            test_copy_case3
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; PSEUDO-LABEL: {{^}}name: test_copy_case3
+    ; PSEUDO:     %0:regv2_64b = functionParameter_v2i64 0
+    ; PSEUDO:     %v:regv4_32b = COPY %0
+    ; PSEUDO:     %v:regv4_32b = COPY %0
+    ; PSEUDO:     %rv:reg32b(i32) = COPY %v.sub32_0
+    ; PSEUDO:     retValue_i32_r %rv(i32)
+    ;
+    ; ASM-LABEL: @test_copy_case3
+    ; ASM:        mov.128b [[DST:%v4w[0-9]+]].xyzw, [[LO:%v2d[0-9]+]].xy
+    %0:regv2_64b = functionParameter_v2i64 0
+    %v:regv4_32b = COPY %0:regv2_64b
+    %v:regv4_32b = COPY %0:regv2_64b ; trick MIR parser into not SSA
+    %rv:reg32b(i32) = COPY %v.sub32_0:regv4_32b
+    retValue_i32_r %rv(i32)
+...
+---
+# Test 1: CopyV3 split path.
+# A full v3 COPY (SubReg==0 on both src and dst) must be expanded into three
+# element-wise COPY instructions.
+name:            test_copy_v3i32_to_v3i32
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+  ; CHECK-LABEL: {{^}}name: test_copy_v3i32_to_v3i32
+  ; The single v3 COPY must be replaced by three element copies:
+  ; CHECK-NOT: %1:regv3_32b = COPY %0
+  ; CHECK:      undef %1.sub32_0:regv3_32b = COPY %0.sub32_0
+  ; CHECK-NEXT: %1.sub32_1:regv3_32b = COPY %0.sub32_1
+  ; CHECK-NEXT: %1.sub32_2:regv3_32b = COPY %0.sub32_2
+  %0:regv3_32b = functionParameter_v3i32 0
+  %0:regv3_32b = functionParameter_v3i32 0 ; trick MIR parser into not SSA
+  %1:regv3_32b = COPY %0:regv3_32b
+  retValue_i32_r %1.sub32_0:regv3_32b
+...
+---
+# Test 2: A COPY from a single v3 sub-element bypasses the CopyV3 splitter
+# because the source has a non-zero SubReg index; it is left unchanged.
+name:            test_copy_v3i32_noop
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+  ; CHECK-LABEL: {{^}}name: test_copy_v3i32_noop
+  ; A COPY from a v3 sub-element stays as-is (not V3 splitter path).
+  ; CHECK: %1:reg32b = COPY %0.sub32_0
+  %0:regv3_32b = functionParameter_v3i32 0
+  %0:regv3_32b = functionParameter_v3i32 0 ; trick MIR parser into not SSA
+  %1:reg32b = COPY %0.sub32_0:regv3_32b
+  retValue_i32_r %1:reg32b
+...

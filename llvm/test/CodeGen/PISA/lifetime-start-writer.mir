@@ -1,0 +1,22 @@
+# RUN: llc -march=pisa -start-after=pisa-insert-lifetime-start -o - %s | FileCheck %s
+
+--- |
+  target triple = "pisa"
+  define void @lifetime_start_writer() {
+    ret void
+  }
+...
+---
+name:            lifetime_start_writer
+tracksRegLiveness: true
+registers:
+  - { id: 0, class: reg32b }
+body:             |
+  bb.0:
+    ; CHECK-LABEL: lifetime_start_writer
+    ; MIR is def-only pseudo; asm writer prints textual lifetime.start form.
+    ; CHECK: lifetime.start %{{.*}};
+    %0:reg32b = IMPLICIT_DEF
+    %0:reg32b = lifetime_start_i32_r
+    ret
+...

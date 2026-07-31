@@ -1,0 +1,43 @@
+# RUN: llc -march=pisa -run-pass=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ISEL %s
+# RUN: llc -march=pisa -start-before=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ASM %s
+
+--- |
+  ; ModuleID = 'foo.ll'
+  source_filename = "foo.ll"
+  target datalayout = "e-p:32:32-p1:64:64-p2:64:64-p3:32:32-p4:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-G1"
+  target triple = "pisa"
+
+  %struct.foo = type { i32, i32 }
+
+  define pisa_kernel void @foo(ptr addrspace(2) byref(%struct.foo) %0) {
+  .lr.ph:
+    %i11 = bitcast ptr addrspace(2) %0 to ptr addrspace(2)
+    %i2 = load i32, ptr addrspace(2) %i11, align 16
+    store i32 %i2, ptr addrspace(1) null, align 4
+    ret void
+  }
+
+...
+---
+name:            foo
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+isSSA:           true
+body:             |
+  bb.1..lr.ph:
+    ; ISEL-LABEL: name: foo
+    ; ISEL: %[[#]]:reg32b = loadParam_i32 0, 0
+
+    ; ASM-LABEL: @foo(
+    ; ASM: ld.param.32b %w0, [%arg0];
+
+    %0:registers(p2) = G_PISA_PARAM_SLOT 0, 0
+    %2:registers(p1) = G_CONSTANT i64 0
+    %1:registers(i32) = G_LOAD %0(p2) :: (invariant load (i32) from %ir.i11, align 16, addrspace 2)
+    G_STORE %1(i32), %2(p1) :: (store (i32) into `ptr addrspace(1) null`, addrspace 1)
+    ret
+
+...

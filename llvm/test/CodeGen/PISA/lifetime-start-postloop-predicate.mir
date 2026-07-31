@@ -1,0 +1,121 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# This test documents a KNOWN-MISSING optimization.
+#
+# Shape (reg %0, undef-on-entry):
+#
+#   bb.1 (preheader): %8 = ucmp_ne %1, 0      ; PREDICATE DEFINED ONCE -> loop-invariant
+#   bb.2 (header):    goto.cond %8 -> bb.4    ; %8 true skips the def block
+#   bb.3 (def):       %0 = iadd %1, %1         ; D: guard (%8, fall-through)
+#   bb.4 (merge):     goto.cond %8 -> bb.6    ; %8 true skips the in-loop use
+#   bb.5 (in-loop U): %10 = iadd %0, %1        ; guard (%8, fall-through)
+#   bb.6 (latch):     goto.cond %9 -> bb.2    ; back-edge
+#   bb.7 (exit):      goto.cond %8 -> bb.9    ; %8 true skips the POST-loop use
+#   bb.8 (post U):    %11 = iadd %0, %1        ; POST-LOOP use, guard (%8, fall-through)
+#   bb.9:             ret
+#
+# Today the pass treats EVERY post-loop observation of %0 as the loop-carried value
+# escaping, unconditionally.
+#
+# WHY A MARKER WOULD BE SOUND:
+#   The predicate %8 is LOOP-INVARIANT (defined once in the preheader bb.1, never
+#   redefined in the loop), and the def D (bb.3) and the post-loop use (bb.8) are
+#   guarded by the SAME predicate/polarity (%8, fall-through). Because %8 is
+#   invariant it holds the same value on every iteration, so:
+#     - %8 == false on every iteration: D runs every iteration, so at loop exit %0
+#       holds the LAST iteration's freshly-produced value; bb.8 (also guarded
+#       %8==false) runs and reads exactly that value -- never the dead carried-in
+#       value the marker discards.
+#     - %8 == true on every iteration: D never runs and %0 stays undef, but bb.8
+#       (guarded %8==false) does not execute, so nothing observes %0.
+#   In both cases the post-loop use cannot observe the value the marker is allowed
+#   to treat as dead, so marking %0 dead at the header is SOUND. The two
+#   preconditions that make it sound -- (1) loop-invariant guard and (2) the
+#   guarded def runs before the post-loop use on every exit path -- are exactly
+#   the obligations the review note attaches to this relaxation. Holding the
+#   post-loop use to the in-loop predicate standard (instead of the blanket
+#   reject) lets the marker through.
+
+# TODO mark %0
+
+
+# CHECK-LABEL: name: postloop_predicate_invariant
+# CHECK-NOT: lifetime_start
+---
+name:            postloop_predicate_invariant
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: reg32b }
+  - { id: 1,  class: reg32b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 11, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %0:reg32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader. The guard predicate %8 is defined HERE, once, so it is
+    ; loop-invariant -- the precondition that makes the post-loop use sound.
+    successors: %bb.2
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:reg32b = iadd_32b_rr %1, %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; merge. SAME predicate %8 guards the in-loop observation bb.5.
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; in-loop observation of %0, guard (%8, fall-through). Makes %0 back-edge-live
+    ; and is covered by D -- so the in-loop part alone would be markable.
+    successors: %bb.6
+    %10:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; loop exit. The SAME loop-invariant predicate %8 guards the post-loop use.
+    successors: %bb.9, %bb.8
+    predgoto 0, %8, %bb.9, implicit-def dead $specialreg_activemask
+    gotolabel %bb.8, implicit-def dead $specialreg_activemask
+
+  bb.8:
+    ; POST-LOOP observation of %0, guard (%8, fall-through) -- same predicate and
+    ; polarity as D. This is what the pass rejects today (isLiveOutOfLoop), and
+    ; what the #10 relaxation would accept as covered.
+    successors: %bb.9
+    %11:reg32b = iadd_32b_rr %0, %1
+    gotolabel %bb.9, implicit-def dead $specialreg_activemask
+
+  bb.9:
+    retValue_i32_r %1
+...

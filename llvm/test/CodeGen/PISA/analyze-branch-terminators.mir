@@ -1,0 +1,92 @@
+# RUN: llc -march=pisa -run-pass=branch-folder -verify-machineinstrs -o - %s \
+# RUN:     | FileCheck %s
+
+# -----------------------------------------------------------------------
+# Test 1: two consecutive predgoto instructions in one block.
+# analyzeBranch sees SecondLast=predgoto (conditional) and
+# Last=predgoto (also conditional, NOT unconditional) -> returns true
+# (unanalyzable).  branch-folder leaves the block as-is.
+# -----------------------------------------------------------------------
+# CHECK-LABEL: name: two_conditional_terminators
+# CHECK:       predgoto
+# CHECK:       predgoto
+
+---
+name:            two_conditional_terminators
+alignment:       1
+legalized:       true
+regBankSelected: true
+selected:        true
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+hasFakeUses:     false
+registers:
+  - { id: 0, class: pred }
+  - { id: 1, class: pred }
+  - { id: 2, class: reg32b }
+frameInfo:
+  maxAlignment:    1
+machineFunctionInfo: {}
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2, %bb.3
+    %2:reg32b = functionParameter_i32 0
+    %0:pred = ucmp_ne_32b_pri %2, 0
+    %1:pred = ucmp_ne_32b_pri %2, 1
+    predgoto 0, %0, %bb.1, implicit-def dead $specialreg_activemask
+    predgoto 0, %1, %bb.2, implicit-def dead $specialreg_activemask
+  bb.1:
+    retValue_i32_r %2
+  bb.2:
+    retValue_i32_r %2
+  bb.3:
+    retValue_i32_r %2
+...
+
+# -----------------------------------------------------------------------
+# Test 2: three terminators in one block (triple-terminator case).
+# analyzeBranch sees SecondLast=predgoto and Last=gotolabel, then checks
+# isUnpredicatedTerminator(*--I) on the instruction before SecondLast and
+# finds another predgoto -> returns true (unanalyzable).
+# -----------------------------------------------------------------------
+# CHECK-LABEL: name: triple_terminator
+# CHECK:       predgoto
+# CHECK:       predgoto
+# CHECK:       gotolabel
+
+---
+name:            triple_terminator
+alignment:       1
+legalized:       true
+regBankSelected: true
+selected:        true
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+hasFakeUses:     false
+registers:
+  - { id: 0, class: pred }
+  - { id: 1, class: pred }
+  - { id: 2, class: reg32b }
+frameInfo:
+  maxAlignment:    1
+machineFunctionInfo: {}
+body:             |
+  bb.0:
+    successors: %bb.1, %bb.2, %bb.3
+    %2:reg32b = functionParameter_i32 0
+    %0:pred = ucmp_ne_32b_pri %2, 0
+    %1:pred = ucmp_ne_32b_pri %2, 1
+    predgoto 0, %0, %bb.1, implicit-def dead $specialreg_activemask
+    predgoto 0, %1, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+  bb.1:
+    retValue_i32_r %2
+  bb.2:
+    retValue_i32_r %2
+  bb.3:
+    retValue_i32_r %2
+...

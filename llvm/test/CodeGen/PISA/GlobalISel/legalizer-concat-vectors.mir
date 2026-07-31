@@ -1,0 +1,33 @@
+# RUN: llc -march=pisa -run-pass=legalizer -verify-machineinstrs %s -o -   | FileCheck -check-prefix=LEGAL %s
+# RUN: llc -march=pisa -start-before=legalizer -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define <4 x i64> @test_concat_2_2xi32(ptr %addr) {
+    %rv = load <4 x i64>, ptr %addr
+    ret <4 x i64> %rv
+  }
+...
+---
+name:            test_concat_2_2xi32
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; LEGAL-LABEL: {{^}}name: test_concat_2_2xi32
+    ; ASM-LABEL: @test_concat_2_2xi32
+
+    ; LEGAL: [[LOAD0:%[0-9]+]]:registers(<2 x i64>) = G_LOAD
+    ; LEGAL: [[LOAD1:%[0-9]+]]:registers(<2 x i64>) = G_LOAD
+    ; LEGAL: {{[0-9]+}}:registers(<4 x i64>) = G_CONCAT_VECTORS [[LOAD0]](<2 x i64>), [[LOAD1]](<2 x i64>)
+
+    ; ASM: ld.global.v2.64b [[RES:%v4d[0-9]+]].xy, [%d0]
+    ; ASM: ld.global.v2.64b [[RES]].zw, [%d0 + 16]
+    ; ASM: return           [[RES]]
+
+    %0:reg64b(p1) = functionParameter_i64 0
+    %3:registers(<2 x i64>) = G_LOAD %0:reg64b(p1) :: (load (<2 x i64>) from %ir.addr, align 32, addrspace 1)
+    %5:registers(i64) = G_CONSTANT i64 16
+    %4:registers(p1) = G_PTR_ADD %0:reg64b, %5:registers(i64)
+    %6:registers(<2 x i64>) = G_LOAD %4:registers(p1) :: (load (<2 x i64>) from %ir.addr + 16, basealign 32, addrspace 1)
+    %1:registers(<4 x i64>) = G_CONCAT_VECTORS %3:registers(<2 x i64>), %6:registers(<2 x i64>)
+    %2:regv4_64b(<4 x i64>) = COPY %1:registers(<4 x i64>)
+    retValue_v4i64_r %2:regv4_64b(<4 x i64>)
+...

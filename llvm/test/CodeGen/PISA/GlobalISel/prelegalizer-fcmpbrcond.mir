@@ -1,0 +1,56 @@
+# RUN: llc -march=pisa -run-pass=pisa-prelegalizer-combiner -verify-machineinstrs %s -o -   | FileCheck -check-prefix=LEGAL %s
+# RUN: llc -march=pisa -start-before=pisa-prelegalizer-combiner -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define i32 @test_fcmpbrcond(float %arg1, float %arg2) {
+  b0:
+    %cmp1 = fcmp olt float %arg1, 0.000000e+00
+    %cmp2 = fcmp olt float %arg2, 0.000000e+00
+    %cond = and i1 %cmp1, %cmp2
+    br i1 %cond, label %b1, label %b2
+
+  b1:                                               ; preds = %b0
+    ret i32 0
+
+  b2:                                               ; preds = %b0
+    ret i32 1
+  }
+...
+---
+name:            test_fcmpbrcond
+tracksRegLiveness: true
+isSSA:           true
+body:             |
+  ; LEGAL-LABEL: {{^}}name: test_fcmpbrcond
+  ; ASM-LABEL: @test_fcmpbrcond
+
+  ; LEGAL: [[CMP1:%[0-9]+]]:_(i1) = G_FCMP floatpred(olt)
+  ; LEGAL: [[CMP2:%[0-9]+]]:_(i1) = G_FCMP floatpred(olt)
+  ; LEGAL: [[AND:%[0-9]+]]:_(i1) = G_AND [[CMP1]], [[CMP2]]
+  ; LEGAL: G_BRCOND [[AND]](i1), %bb.1
+  ; LEGAL: G_BR %bb.2
+
+  ; ASM: fcmp.lt.f [[CMP1:%w[0-9]+]], %w0, 0x00000000
+  ; ASM: fcmp.lt.f [[CMP2:%w[0-9]+]], %w1, 0x00000000
+  ; ASM: and.32b [[AND:%w[0-9]+]], [[CMP1]], [[CMP2]]
+  ; ASM: ucmp.ne.32b [[UCMP:%p[0-9]+]], [[AND]], 0
+  ; ASM: goto.cond ![[UCMP]]
+  bb.1.b0:
+    %0:reg32b(f32) = functionParameter_i32 0
+    %1:reg32b(f32) = functionParameter_i32 1
+    %2:_(f32) = G_FCONSTANT float 0.000000e+00
+    %6:_(i32) = G_CONSTANT i32 1
+    %8:_(i32) = G_CONSTANT i32 0
+    %3:_(i1) = G_FCMP floatpred(olt), %0(f32), %2
+    %4:_(i1) = G_FCMP floatpred(olt), %1(f32), %2
+    %5:_(i1) = G_AND %3, %4
+    G_BRCOND %5(i1), %bb.2
+    G_BR %bb.3
+
+  bb.2.b1:
+    %9:reg32b(i32) = COPY %8(i32)
+    retValue_i32_r %9(i32)
+
+  bb.3.b2:
+    %7:reg32b(i32) = COPY %6(i32)
+    retValue_i32_r %7(i32)
+...

@@ -1,0 +1,40 @@
+# RUN: llc -march=pisa -run-pass=pisa-prelegalizer-combiner -verify-machineinstrs %s -o -   | FileCheck -check-prefix=LEGAL %s
+# RUN: llc -march=pisa -start-before=pisa-prelegalizer-combiner -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define pisa_kernel void @test_load_i1() {
+    ; LEGAL-LABEL: {{^}}name: test_load_i1
+    ; LEGAL:     [[CONST:%[0-9]+]]:_(p1) = G_CONSTANT i64 0
+    ; LEGAL:     [[LOAD:%[0-9]+]]:_(i1) = G_LOAD [[CONST]](p1)
+    ; LEGAL:     [[ZEXT:%[0-9]+]]:_(i8) = G_ZEXT [[LOAD]](i1)
+    ; LEGAL:     [[SEXT:%[0-9]+]]:_(i8) = G_SEXT_INREG [[ZEXT]], 1
+    ; LEGAL:     [[SEXT2:%[0-9]+]]:_(i32) = G_SEXT [[SEXT]](i8)
+
+    %L = load i1, ptr addrspace(1) null, align 1
+    %S = sext i1 %L to i32
+    store i32 %S, ptr addrspace(1) null, align 4
+    ret void
+  }
+...
+---
+name:            test_load_i1
+alignment:       1
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ASM: mov.64b 	 [[D0:%d[0-9]+]], 0;
+    ; ASM: ld.global.8b	 [[B0:%b[0-9]+]], [[[D0]]];
+    ; ASM: zext.16b.8b 	 [[H0:%h[0-9]+]], [[B0]];
+    ; ASM: and.16b 	 [[H1:%h[0-9]+]], [[H0]], 1;
+    ; ASM: shl.16b 	 [[H2:%h[0-9]+]], [[H1]], 15;
+    ; ASM: asr.16b 	 [[H3:%h[0-9]+]], [[H2]], 15;
+    ; ASM: zext.32b.16b  [[W0:%w[0-9]+]], [[H3]];
+    ; ASM: shl.32b 	 [[W1:%w[0-9]+]], [[W0]], 24;
+    ; ASM: asr.32b 	 [[W2:%w[0-9]+]], [[W1]], 24;
+    ; ASM: st.global.32b [[[D0]]], [[W2]];
+
+    %1:_(p1) = G_CONSTANT i64 0
+    %0:_(i1) = G_LOAD %1:_(p1) :: (load (i1) from `ptr addrspace(1) null`, addrspace 1)
+    %2:_(i32) = G_SEXT %0:_(i1)
+    G_STORE %2:_(i32), %1:_(p1) :: (store (i32) into `ptr addrspace(1) null`, addrspace 1)
+    ret
+...

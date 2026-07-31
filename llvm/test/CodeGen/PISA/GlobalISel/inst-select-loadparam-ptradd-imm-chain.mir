@@ -1,0 +1,57 @@
+# RUN: llc -march=pisa -run-pass=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ISEL %s
+# RUN: llc -march=pisa -start-before=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ASM %s
+
+--- |
+  ; ModuleID = 'foo.mir'
+  source_filename = "foo.mir"
+  target datalayout = "e-p:32:32-p1:64:64-p2:64:64-p3:32:32-p4:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-G1"
+  target triple = "pisa"
+
+  %"struct.user_def_types::no_cnstr" = type { float, i32, i8 }
+
+  define weak_odr pisa_kernel void @kernelIN14(ptr addrspace(2) byref(%"struct.user_def_types::no_cnstr") align 4 %src, ptr addrspace(1) %dst) {
+  entry:
+    %0 = getelementptr inbounds i8, ptr addrspace(2) %src, i64 9
+    tail call void @llvm.memcpy.p1.p2.i64(ptr addrspace(1) align 2 %dst, ptr addrspace(2) align 2 dereferenceable(3) %0, i64 3, i1 false)
+    ret void
+  }
+
+  ; Function Attrs: nocallback nofree nounwind willreturn memory(argmem: readwrite)
+  declare void @llvm.memcpy.p1.p2.i64(ptr addrspace(1) noalias nocapture writeonly, ptr addrspace(2) noalias nocapture readonly, i64, i1 immarg) #0
+
+  attributes #0 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+
+...
+---
+name:            kernelIN14
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+isSSA:           true
+body:             |
+  bb.0.entry:
+    ; ISEL-LABEL: name: kernelIN14
+    ; ISEL: %[[#]]:regv2_8b = loadParam_v2i8 0, 9
+    ; ISEL: %[[#]]:reg8b = loadParam_i8 0, 11
+
+    ; ASM-LABEL: @kernelIN14(
+    ; ASM: ld.param.v2.8b %v2b0, [%arg0+9];
+    ; ASM: ld.param.8b %b0, [%arg0+11];
+
+    %0:registers(p2) = G_PISA_PARAM_SLOT 0, 0
+    %1:reg64b(p1) = loadParam_i64 1, 0
+    %2:registers(i64) = G_CONSTANT i64 9
+    %3:registers(p2) = nuw G_PTR_ADD %0, %2(i64)
+    %4:registers(<2 x i8>) = G_LOAD %3(p2) :: (dereferenceable invariant load (i16) from %ir.0, align 2, addrspace 2)
+    G_STORE %4(<2 x i8>), %1(p1) :: (store (i16) into %ir.dst, align 2, addrspace 1)
+    %9:registers(p2) = COPY %3
+    %5:registers(i64) = G_CONSTANT i64 2
+    %6:registers(p2) = G_PTR_ADD %9, %5(i64)
+    %7:registers(i8) = G_LOAD %6(p2) :: (dereferenceable invariant load (i8) from %ir.0 + 2, addrspace 2)
+    %8:registers(p1) = G_PTR_ADD %1, %5(i64)
+    G_STORE %7(i8), %8(p1) :: (store (i8) into %ir.dst + 2, addrspace 1)
+    ret
+
+...

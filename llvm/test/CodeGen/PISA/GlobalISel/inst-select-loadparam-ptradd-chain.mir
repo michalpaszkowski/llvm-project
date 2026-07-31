@@ -1,0 +1,72 @@
+# RUN: llc -march=pisa -run-pass=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ISEL %s
+# RUN: llc -march=pisa -start-before=instruction-select -verify-machineinstrs %s -o - | \
+# RUN:   FileCheck -check-prefix=ASM %s
+
+--- |
+  source_filename = "foo.ll"
+  target datalayout = "e-p:32:32-p1:64:64-p2:64:64-p3:32:32-p4:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-G1"
+  target triple = "pisa"
+
+  %struct.foo = type { i32, [12 x [2 x %struct.bar]] }
+  %struct.bar = type { i32, i32, i32 }
+
+  define pisa_kernel void @foo(ptr addrspace(2) byref(%struct.foo) %0, i64 %1, i64 %2) {
+  .lr.ph:
+    %i3 = getelementptr %struct.foo, ptr addrspace(2) %0, i64 0, i32 1, i64 %1, i64 %2, i32 2
+    %i4 = load i32, ptr addrspace(2) %i3, align 16
+    store i32 %i4, ptr addrspace(1) null, align 4
+    ret void
+  }
+
+...
+---
+name:            foo
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+isSSA:           true
+body:             |
+  bb.1..lr.ph:
+    ; ISEL-LABEL: name: foo
+    ; ISEL: [[T0:%[0-9]+]]:reg64b = loadParam_i64 1, 0
+    ; ISEL: [[T1:%[0-9]+]]:reg64b = loadParam_i64 2, 0
+    ; ISEL: [[T2:%[0-9]+]]:reg64b = smul_64b_ri [[T0]], 24
+    ; ISEL: [[T3:%[0-9]+]]:reg64b = smul_64b_ri [[T1]], 12
+    ; ISEL: [[T4:%[0-9]+]]:reg64b = iadd_64b_ir 8, [[T3]]
+    ; ISEL: [[T5:%[0-9]+]]:reg64b = iadd_64b_rr [[T4]], [[T2]]
+    ; ISEL: [[T6:%[0-9]+]]:reg64b = iadd_64b_ri [[T5]], 4
+    ; ISEL: [[T7:%[0-9]+]]:reg32b = trunc_32b_64b_r [[T6]]
+    ; ISEL: %[[#]]:reg32b = loadParam_i32_ir 0, [[T7]] :: (load (i32) from %ir.i3, align 16, addrspace 2)
+
+    ; ASM-LABEL: @foo
+    ; ASM: ld.param.64b [[T0:%d[0-9]+]], [%arg1];
+    ; ASM: ld.param.64b [[T1:%d[0-9]+]], [%arg2];
+    ; ASM: smul.64b     [[T2:%d[0-9]+]], [[T0]], 24;
+    ; ASM: smul.64b     [[T3:%d[0-9]+]], [[T1]], 12;
+    ; ASM: iadd.64b     [[T4:%d[0-9]+]], 8, [[T3]];
+    ; ASM: iadd.64b     [[T5:%d[0-9]+]], [[T4]], [[T2]];
+    ; ASM: iadd.64b     [[T6:%d[0-9]+]], [[T5]], 4;
+    ; ASM: trunc.32b.64b [[T7:%w[0-9]+]], [[T6]];
+    ; ASM: ld.param.32b %w[[#]], [%arg0 + [[T7]]];
+
+    %0:registers(p2) = G_PISA_PARAM_SLOT 0, 0
+    %1:reg64b(i64) = loadParam_i64 1, 0
+    %2:reg64b(i64) = loadParam_i64 2, 0
+    %14:registers(p1) = G_CONSTANT i64 0
+    %3:registers(i64) = G_CONSTANT i64 4
+    %4:registers(p2) = G_PTR_ADD %0, %3(i64)
+    %5:registers(i64) = G_CONSTANT i64 24
+    %6:registers(i64) = G_MUL %1, %5
+    %7:registers(p2) = G_PTR_ADD %4, %6(i64)
+    %8:registers(i64) = G_CONSTANT i64 12
+    %9:registers(i64) = G_MUL %2, %8
+    %10:registers(p2) = G_PTR_ADD %7, %9(i64)
+    %15:registers(p2) = COPY %10
+    %11:registers(i64) = G_CONSTANT i64 8
+    %12:registers(p2) = G_PTR_ADD %15, %11(i64)
+    %13:registers(i32) = G_LOAD %12(p2) :: (load (i32) from %ir.i3, align 16, addrspace 2)
+    G_STORE %13(i32), %14(p1) :: (store (i32) into `ptr addrspace(1) null`, addrspace 1)
+    ret
+
+...

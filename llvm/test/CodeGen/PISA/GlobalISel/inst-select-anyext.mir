@@ -1,0 +1,123 @@
+# RUN: llc -march=pisa -run-pass=instruction-select -verify-machineinstrs %s -o -   | FileCheck -check-prefix=ISEL %s
+# RUN: llc -march=pisa -start-before=instruction-select -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define i64 @test_anyext_i32_i64(i32) {
+    ret i64 0
+  }
+
+  define i64 @test_anyext_i16_i64(i16) {
+    ret i64 0
+  }
+
+  define i64 @test_anyext_i8_i64(i8) {
+    ret i64 0
+  }
+
+  define i32 @test_anyext_i16_i32(i16) {
+    ret i32 0
+  }
+
+  define i32 @test_anyext_i8_i32(i8) {
+    ret i32 0
+  }
+
+  define i16 @test_anyext_i8_i16(i8) {
+    ret i16 0
+  }
+...
+---
+name:            test_anyext_i32_i64
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i32_i64
+    ; ASM-LABEL: @test_anyext_i32_i64
+    %0:reg32b(i32) = functionParameter_i32 0
+    ; ISEL: %{{[0-9]+}}:reg64b = zext_64b_32b_r %{{[0-9]+}}
+    ; ASM:  zext.64b.32b %d{{[0-9]+}}, %w{{[0-9]+}}
+    %1:reg64b(i64) = G_ANYEXT %0(i32)
+    retValue_i64_r %1(i64)
+
+...
+---
+name:            test_anyext_i16_i64
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i16_i64
+    ; ASM-LABEL: @test_anyext_i16_i64
+    %0:reg16b(i16) = functionParameter_i16 0
+    ; ISEL: %{{[0-9]+}}:reg64b = zext_64b_16b_r %{{[0-9]+}}
+    ; ASM:  zext.64b.16b %d{{[0-9]+}}, %h{{[0-9]+}}
+    %1:reg64b(i64) = G_ANYEXT %0(i16)
+    retValue_i64_r %1(i64)
+
+...
+---
+name:            test_anyext_i8_i64
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i8_i64
+    ; ASM-LABEL: @test_anyext_i8_i64
+    %0:reg8b(i8) = functionParameter_i8 0
+    ; ISEL: %{{[0-9]+}}:reg64b = zext_64b_8b_r %{{[0-9]+}}
+    ; ASM:  zext.64b.8b %d{{[0-9]+}}, %b{{[0-9]+}}
+    %1:reg64b(i64) = G_ANYEXT %0(i8)
+    retValue_i64_r %1(i64)
+
+...
+---
+name:            test_anyext_i16_i32
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i16_i32
+    ; ASM-LABEL: @test_anyext_i16_i32
+    %0:reg16b(i16) = functionParameter_i16 0
+    ; ISEL: %{{[0-9]+}}:reg32b = zext_32b_16b_r %{{[0-9]+}}
+    ; ASM:  zext.32b.16b %w{{[0-9]+}}, %h{{[0-9]+}}
+    %1:reg32b(i32) = G_ANYEXT %0(i16)
+    retValue_i32_r %1(i32)
+
+...
+---
+name:            test_anyext_i8_i32
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i8_i32
+    ; ASM-LABEL: @test_anyext_i8_i32
+    %0:reg8b(i8) = functionParameter_i8 0
+    ; ISEL: %{{[0-9]+}}:reg32b = zext_32b_8b_r %{{[0-9]+}}
+    ; ASM:  zext.32b.8b %w{{[0-9]+}}, %b{{[0-9]+}}
+    %1:reg32b(i32) = G_ANYEXT %0(i8)
+    retValue_i32_r %1(i32)
+
+...
+---
+name:            test_anyext_i8_i16
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_anyext_i8_i16
+    ; ASM-LABEL: @test_anyext_i8_i16
+    %0:reg8b(i8) = functionParameter_i8 0
+    ; ISEL: %{{[0-9]+}}:reg16b = zext_16b_8b_r %{{[0-9]+}}
+    ; ASM:  zext.16b.8b %h{{[0-9]+}}, %b{{[0-9]+}}
+    %1:reg16b(i16) = G_ANYEXT %0(i8)
+    retValue_i16_r %1(i16)
+
+...

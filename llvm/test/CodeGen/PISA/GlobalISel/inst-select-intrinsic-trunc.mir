@@ -1,0 +1,23 @@
+# RUN: llc -march=pisa -run-pass=instruction-select -verify-machineinstrs %s -o -   | FileCheck -check-prefix=ISEL %s
+# RUN: llc -march=pisa -start-before=instruction-select -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+--- |
+  define float @test_intrinsic_trunc_f32(float) {
+    ret float 0.0
+  }
+...
+---
+name:            test_intrinsic_trunc_f32
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; ISEL-LABEL: {{^}}name: test_intrinsic_trunc_f32
+    ; ASM-LABEL: @test_intrinsic_trunc_f32
+    %0:reg32b(f32) = functionParameter_i32 0
+    ; ISEL: %{{[0-9]+}}:reg32b = frnd_rz_f_r %{{[0-9]+}}
+    ; ASM:  frnd.rz.f %w{{[0-9]+}}, %w{{[0-9]+}}
+    %1:reg32b(f32) = G_INTRINSIC_TRUNC %0(f32)
+    retValue_i32_r %1(f32)
+
+...

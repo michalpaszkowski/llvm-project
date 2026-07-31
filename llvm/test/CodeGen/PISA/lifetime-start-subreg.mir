@@ -1,0 +1,292 @@
+# RUN: llc -march=pisa -run-pass=pisa-insert-lifetime-start \
+# RUN:   -pisa-insert-lifetime-start-enable=1 -verify-machineinstrs -o - %s \
+# RUN:   | FileCheck %s
+
+# Sub-register handling in the computeBlockLiveness liveness scan and the cover.
+
+# A FULL (non-subreg) def of %0 in the EXIT block -> not live-out of the loop
+# -> marker IS inserted.
+
+# CHECK-LABEL: name: subreg_no_escape_positive
+# CHECK: %0:regv2_32b = lifetime_start_v2i32_r
+---
+name:            subreg_no_escape_positive
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: regv2_32b }
+  - { id: 1,  class: reg32b }
+  - { id: 3,  class: reg64b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 21, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %3:reg64b = functionParameter_i64 1
+    %0:regv2_32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    ; unique preheader (single successor = header).
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    ; header. %8 guards the def block bb.3 (taken -> skip to bb.4).
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; real NON-forwarding full def of %0, control-dependent on (%8, fall-through).
+    successors: %bb.4
+    %0:regv2_32b = ld_global_v2i32_ri %3, 0, 0
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    ; merge. The SAME predicate %8 guards the observation block bb.5.
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0 via a forwarding extract then a real use, same guard
+    ; (%8, fall-through). %0 is upward-exposed here -> back-edge-live.
+    successors: %bb.6
+    %21:reg32b = extract_0_i32_v2i32_r %0
+    %10:reg32b = iadd_32b_rr %21, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    ; latch.
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; exit. A FULL (non-subreg) def of %0; does not read %0 -> no escape.
+    %0:regv2_32b = ld_global_v2i32_ri %3, 0, 0
+    retValue_i32_r %1
+...
+
+# A PARTIAL (sub32_0) def of %0 in the EXIT. sub32_1 is preserved, the value is
+# considered as alive after loop. The marker must be REJECTED.
+
+# CHECK-LABEL: name: subreg_escape_negative
+# CHECK-NOT: lifetime_start
+---
+name:            subreg_escape_negative
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: regv2_32b }
+  - { id: 1,  class: reg32b }
+  - { id: 3,  class: reg64b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 21, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %3:reg64b = functionParameter_i64 1
+    %0:regv2_32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.4
+    %0:regv2_32b = ld_global_v2i32_ri %3, 0, 0
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    successors: %bb.6
+    %21:reg32b = extract_0_i32_v2i32_r %0
+    %10:reg32b = iadd_32b_rr %21, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; exit. PARTIAL (sub32_0) def reads %0 (preserved lane sub32_1) -> the
+    ; loop-carried value escapes -> %0 must NOT be marked.
+    %0.sub32_0:regv2_32b = COPY %1
+    retValue_i32_r %1
+...
+
+# TWO partial defs in the EXIT block write BOTH lanes, so %0 is fully redefined
+# there and the carried value is dead -> marking %0 IS sound. But
+# computeBlockLiveness treats every subreg def as non-killing and each one READS %0,
+# so the two writes are never combined into a full-register kill: %0 still looks live-out
+# and the marker is NOT inserted.
+
+# TODO: mark %0
+
+# CHECK-LABEL: name: subreg_full_coverage_missed
+# CHECK-NOT: lifetime_start
+---
+name:            subreg_full_coverage_missed
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: regv2_32b }
+  - { id: 1,  class: reg32b }
+  - { id: 3,  class: reg64b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 21, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %3:reg64b = functionParameter_i64 1
+    %0:regv2_32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    successors: %bb.4
+    %0:regv2_32b = ld_global_v2i32_ri %3, 0, 0
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    successors: %bb.6
+    %21:reg32b = extract_0_i32_v2i32_r %0
+    %10:reg32b = iadd_32b_rr %21, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; exit. Two partial defs write BOTH lanes -> %0 fully redefined, carried
+    ; value dead. Not recognized as a kill today (see comment above) -> no marker.
+    %0.sub32_0:regv2_32b = COPY %1
+    %0.sub32_1:regv2_32b = COPY %1
+    retValue_i32_r %1
+...
+
+# The loop-body DEF of %0 itself is two partial defs covering both lanes, so %0
+# is fully (re)defined each iteration under (%8, fall-through) -- just like the
+# single full def in subreg_no_escape_positive. But neither partial def is a
+# "real full def", so RDefs is EMPTY and the cover treats %0 as
+# a pass-through with no redefining def -> NO marker.
+
+# TODO: mark %0
+
+# CHECK-LABEL: name: subreg_split_def_missed
+# CHECK-NOT: lifetime_start
+---
+name:            subreg_split_def_missed
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         false
+registers:
+  - { id: 0,  class: regv2_32b }
+  - { id: 1,  class: reg32b }
+  - { id: 3,  class: reg64b }
+  - { id: 8,  class: pred }
+  - { id: 9,  class: pred }
+  - { id: 10, class: reg32b }
+  - { id: 21, class: reg32b }
+body:             |
+  bb.0:
+    successors: %bb.1
+    %1:reg32b = functionParameter_i32 0
+    %3:reg64b = functionParameter_i64 1
+    %0:regv2_32b = IMPLICIT_DEF
+    gotolabel %bb.1, implicit-def dead $specialreg_activemask
+
+  bb.1:
+    successors: %bb.2
+    gotolabel %bb.2, implicit-def dead $specialreg_activemask
+
+  bb.2:
+    successors: %bb.4, %bb.3
+    %8:pred = ucmp_ne_32b_pri %1, 0
+    predgoto 0, %8, %bb.4, implicit-def dead $specialreg_activemask
+    gotolabel %bb.3, implicit-def dead $specialreg_activemask
+
+  bb.3:
+    ; the loop-body def of %0 is SPLIT into two partial defs that together write
+    ; BOTH lanes -> %0 fully (re)defined here each iteration. Neither is a real
+    ; full def (subreg != 0), so the cover sees no redefining def -> no marker.
+    successors: %bb.4
+    %0.sub32_0:regv2_32b = COPY %1
+    %0.sub32_1:regv2_32b = COPY %1
+    gotolabel %bb.4, implicit-def dead $specialreg_activemask
+
+  bb.4:
+    successors: %bb.6, %bb.5
+    predgoto 0, %8, %bb.6, implicit-def dead $specialreg_activemask
+    gotolabel %bb.5, implicit-def dead $specialreg_activemask
+
+  bb.5:
+    ; observation of %0, same guard. %0 is upward-exposed -> back-edge-live, so
+    ; every gate EXCEPT the cover is satisfied; only the missing full def
+    ; suppresses the marker.
+    successors: %bb.6
+    %21:reg32b = extract_0_i32_v2i32_r %0
+    %10:reg32b = iadd_32b_rr %21, %1
+    gotolabel %bb.6, implicit-def dead $specialreg_activemask
+
+  bb.6:
+    successors: %bb.2, %bb.7
+    %9:pred = scmp_lt_32b_pri %1, 0
+    predgoto 0, %9, %bb.2, implicit-def dead $specialreg_activemask
+    gotolabel %bb.7, implicit-def dead $specialreg_activemask
+
+  bb.7:
+    ; exit. No use of %0 -> not an escape; the missed marker is due to the split
+    ; def in bb.3, not liveness here.
+    retValue_i32_r %1
+...

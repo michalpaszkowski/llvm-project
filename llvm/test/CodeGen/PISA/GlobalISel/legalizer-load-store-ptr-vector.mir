@@ -1,0 +1,246 @@
+# RUN: llc -march=pisa -run-pass=legalizer -verify-machineinstrs %s -o - | FileCheck -check-prefix=LEGAL %s
+# RUN: llc -march=pisa -start-before=legalizer -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM %s
+# Check that loads/stores of odd-sized vectors of pointers are legalized correctly.
+
+--- |
+  define void @test_load_store_ptr_vector(ptr addrspace(4) %in, ptr addrspace(4) %out) {
+    %val = load <5 x ptr addrspace(4)>, ptr addrspace(4) %in
+    store <5 x ptr addrspace(4)> %val, ptr addrspace(4) %out
+    ret void
+  }
+
+  define void @test_load_store_ptr_vector_global_5elem() {
+    %LGV7 = load <5 x ptr addrspace(4)>, ptr addrspace(1) null, align 8
+    store <5 x ptr addrspace(4)> %LGV7, ptr addrspace(1) null, align 8
+    ret void
+  }
+
+  define void @test_load_store_ptr_vector_global_6elem() {
+    %LGV7 = load <6 x ptr addrspace(4)>, ptr addrspace(1) null, align 8
+    store <6 x ptr addrspace(4)> %LGV7, ptr addrspace(1) null, align 8
+    ret void
+  }
+
+  define void @test_load_store_ptr_vector_global_7elem() {
+    %LGV7 = load <7 x ptr addrspace(4)>, ptr addrspace(1) null, align 8
+    store <7 x ptr addrspace(4)> %LGV7, ptr addrspace(1) null, align 8
+    ret void
+  }
+...
+---
+name:              test_load_store_ptr_vector
+tracksRegLiveness: true
+body:             |
+  bb.1:
+    ; LEGAL-LABEL: {{^}}name: test_load_store_ptr_vector
+    ; LEGAL: [[IN:%.+]]:reg32b(p4) = functionParameter_i32 0
+    ; LEGAL: [[OUT:%.+]]:reg32b(p4) = functionParameter_i32 1
+    ; LEGAL: [[LOAD_VEC:%.+]]:_(<4 x i32>) = G_LOAD [[IN]](p4)
+    ; LEGAL: [[ELEM0:%.+]]:_(i32), [[ELEM1:%.+]]:_(i32), [[ELEM2:%.+]]:_(i32), [[ELEM3:%.+]]:_(i32) = G_UNMERGE_VALUES [[LOAD_VEC]](<4 x i32>)
+    ; LEGAL: [[PTR0:%.+]]:_(p4) = G_INTTOPTR [[ELEM0]](i32)
+    ; LEGAL: [[PTR1:%.+]]:_(p4) = G_INTTOPTR [[ELEM1]](i32)
+    ; LEGAL: [[PTR2:%.+]]:_(p4) = G_INTTOPTR [[ELEM2]](i32)
+    ; LEGAL: [[PTR3:%.+]]:_(p4) = G_INTTOPTR [[ELEM3]](i32)
+    ; LEGAL: [[CONST16:%.+]]:_(i32) = G_CONSTANT i32 16
+    ; LEGAL: [[PTR_ADD:%.+]]:_(p4) = nuw inbounds G_PTR_ADD [[IN]], [[CONST16]](i32)
+    ; LEGAL: [[LOAD_SCALAR:%.+]]:_(i32) = G_LOAD [[PTR_ADD]](p4)
+    ; LEGAL: [[PTR_SCALAR:%.+]]:_(p4) = G_INTTOPTR [[LOAD_SCALAR]](i32)
+    ; LEGAL: [[INT0:%.+]]:_(i32) = G_PTRTOINT [[PTR0]](p4)
+    ; LEGAL: [[INT1:%.+]]:_(i32) = G_PTRTOINT [[PTR1]](p4)
+    ; LEGAL: [[INT2:%.+]]:_(i32) = G_PTRTOINT [[PTR2]](p4)
+    ; LEGAL: [[INT3:%.+]]:_(i32) = G_PTRTOINT [[PTR3]](p4)
+    ; LEGAL: [[VEC:%.+]]:_(<4 x i32>) = G_BUILD_VECTOR [[INT0]](i32), [[INT1]](i32), [[INT2]](i32), [[INT3]](i32)
+    ; LEGAL: G_STORE [[VEC]](<4 x i32>), [[OUT]](p4)
+    ; LEGAL: [[CONST16_2:%.+]]:_(i32) = G_CONSTANT i32 16
+    ; LEGAL: [[PTR_ADD2:%.+]]:_(p4) = nuw inbounds G_PTR_ADD [[OUT]], [[CONST16_2]](i32)
+    ; LEGAL: [[INT_SCALAR:%.+]]:_(i32) = G_PTRTOINT [[PTR_SCALAR]](p4)
+    ; LEGAL: G_STORE [[INT_SCALAR]](i32), [[PTR_ADD2]](p4)
+    ; LEGAL: ret
+
+    ; ASM-LABEL: @test_load_store_ptr_vector
+    ; ASM: (.reg .32b [[R0:%w[0-9]+]], .reg .32b [[R1:%w[0-9]+]])
+    ; ASM: .reg .32b [[R3:%w[0-9]+]];
+    ; ASM: .reg .v4.32b [[R2:%v4w[0-9]+]];
+    ; ASM: ld.private.v4.32b [[R2]], [[[R0]]];
+    ; ASM: ld.private.32b [[R3]], [[[R0]] + 16];
+    ; ASM: st.private.v4.32b [[[R1]]], [[R2]];
+    ; ASM: st.private.32b [[[R1]] + 16], [[R3]];
+    ; ASM: return;
+
+    %0:reg32b(p4) = functionParameter_i32 0
+    %1:reg32b(p4) = functionParameter_i32 1
+    %2:_(<5 x p4>) = G_LOAD %0:reg32b(p4) :: (load (<5 x p4>) from %ir.in, align 32)
+    G_STORE %2:_(<5 x p4>), %1:reg32b(p4) :: (store (<5 x p4>) into %ir.out, align 32)
+    ret
+
+...
+---
+name:            test_load_store_ptr_vector_global_5elem
+tracksRegLiveness: true
+body:             |
+  bb.1 (%ir-block.0):
+    ; LEGAL-LABEL: name: test_load_store_ptr_vector_global_5elem
+    ; LEGAL: [[C:%[0-9]+]]:_(p1) = G_CONSTANT i64 0
+    ; LEGAL: [[LOAD:%[0-9]+]]:_(<3 x i64>) = G_LOAD [[C]](p1) :: (load (<3 x i64>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: [[UV:%[0-9]+]]:_(i64), [[UV1:%[0-9]+]]:_(i64), [[UV2:%[0-9]+]]:_(i64) = G_UNMERGE_VALUES [[LOAD]](<3 x i64>)
+    ; LEGAL: [[BITCAST:%[0-9]+]]:_(<2 x i32>) = G_BITCAST [[UV]](i64)
+    ; LEGAL: [[BITCAST1:%[0-9]+]]:_(<2 x i32>) = G_BITCAST [[UV1]](i64)
+    ; LEGAL: [[BITCAST2:%[0-9]+]]:_(<2 x i32>) = G_BITCAST [[UV2]](i64)
+    ; LEGAL: [[DEF:%[0-9]+]]:_(<6 x i32>) = IMPLICIT_DEF
+    ; LEGAL: [[INSERT_SUBVECTOR:%[0-9]+]]:_(<6 x i32>) = G_INSERT_SUBVECTOR [[DEF]], [[BITCAST]](<2 x i32>), 0
+    ; LEGAL: [[INSERT_SUBVECTOR1:%[0-9]+]]:_(<6 x i32>) = G_INSERT_SUBVECTOR [[INSERT_SUBVECTOR]], [[BITCAST1]](<2 x i32>), 2
+    ; LEGAL: [[INSERT_SUBVECTOR2:%[0-9]+]]:_(<6 x i32>) = G_INSERT_SUBVECTOR [[INSERT_SUBVECTOR1]], [[BITCAST2]](<2 x i32>), 4
+    ; LEGAL: [[COPY:%[0-9]+]]:_(<6 x i32>) = COPY [[INSERT_SUBVECTOR2]](<6 x i32>)
+    ; LEGAL: [[EXTRACT_SUBVECTOR:%[0-9]+]]:_(<5 x i32>) = G_EXTRACT_SUBVECTOR [[COPY]](<6 x i32>), 0
+    ; LEGAL: [[C1:%[0-9]+]]:_(i32) = G_CONSTANT i32 0
+    ; LEGAL: [[EVEC:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<5 x i32>), [[C1]](i32)
+    ; LEGAL: [[C2:%[0-9]+]]:_(i32) = G_CONSTANT i32 1
+    ; LEGAL: [[EVEC1:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<5 x i32>), [[C2]](i32)
+    ; LEGAL: [[C3:%[0-9]+]]:_(i32) = G_CONSTANT i32 2
+    ; LEGAL: [[EVEC2:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<5 x i32>), [[C3]](i32)
+    ; LEGAL: [[C4:%[0-9]+]]:_(i32) = G_CONSTANT i32 3
+    ; LEGAL: [[EVEC3:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<5 x i32>), [[C4]](i32)
+    ; LEGAL: [[C5:%[0-9]+]]:_(i32) = G_CONSTANT i32 4
+    ; LEGAL: [[EVEC4:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<5 x i32>), [[C5]](i32)
+    ; LEGAL: [[INTTOPTR:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC]](i32)
+    ; LEGAL: [[INTTOPTR1:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC1]](i32)
+    ; LEGAL: [[INTTOPTR2:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC2]](i32)
+    ; LEGAL: [[INTTOPTR3:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC3]](i32)
+    ; LEGAL: [[INTTOPTR4:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC4]](i32)
+    ; LEGAL: [[PTRTOINT:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR]](p4)
+    ; LEGAL: [[PTRTOINT1:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR1]](p4)
+    ; LEGAL: [[PTRTOINT2:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR2]](p4)
+    ; LEGAL: [[PTRTOINT3:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR3]](p4)
+    ; LEGAL: [[BUILD_VECTOR:%[0-9]+]]:_(<4 x i32>) = G_BUILD_VECTOR [[PTRTOINT]](i32), [[PTRTOINT1]](i32), [[PTRTOINT2]](i32), [[PTRTOINT3]](i32)
+    ; LEGAL: G_STORE [[BUILD_VECTOR]](<4 x i32>), [[C]](p1) :: (store (<4 x i32>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: [[C6:%[0-9]+]]:_(p1) = G_CONSTANT i64 16
+    ; LEGAL: [[PTRTOINT4:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR4]](p4)
+    ; LEGAL: G_STORE [[PTRTOINT4]](i32), [[C6]](p1) :: (store (i32) into `ptr addrspace(1) null` + 16, align 8, addrspace 1)
+    ; LEGAL: ret
+
+   ; ASM-LABEL: void @test_load_store_ptr_vector_global_5elem(
+   ; ASM: 	.reg .64b [[R64_R0:%[-a-zA-Z$._0-9]+]], [[R64_R8:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	.reg .v3.64b [[VR3_64_R1:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	.reg .v2.32b [[VR2_32_R2:%[-a-zA-Z$._0-9]+]], [[VR2_32_R3:%[-a-zA-Z$._0-9]+]], [[VR2_32_R4:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	.reg .v6.32b [[VR6_32_R5:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	.reg .32b [[R32_R6:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	.reg .v4.32b [[VR4_32_R7:%[-a-zA-Z$._0-9]+]];
+   ; ASM: 	mov.64b 	[[R64_R0]], 0;
+   ; ASM: 	ld.global.v3.64b	 [[VR3_64_R1]], [[[R64_R0]]];
+   ; ASM: 	mov.64b 	[[VR2_32_R2]].xy, [[VR3_64_R1]].x;
+   ; ASM: 	mov.64b 	[[VR2_32_R3]].xy, [[VR3_64_R1]].y;
+   ; ASM: 	mov.64b 	[[VR2_32_R4]].xy, [[VR3_64_R1]].z;
+   ; ASM: 	insert.0.v2.32b 	[[VR6_32_R5]], [[VR2_32_R2]];
+   ; ASM: 	insert.2.v2.32b 	[[VR6_32_R5]], [[VR2_32_R3]];
+   ; ASM: 	insert.4.v2.32b 	[[VR6_32_R5]], [[VR2_32_R4]];
+   ; ASM: 	extract.4.32b 	[[R32_R6]], [[VR6_32_R5]];
+   ; ASM: 	mov.64b 	[[VR4_32_R7]].xy, [[VR6_32_R5]].xy;
+   ; ASM: 	mov.64b 	[[VR4_32_R7]].zw, [[VR6_32_R5]].zw;
+   ; ASM: 	st.global.v4.32b	 [[[R64_R0]]], [[VR4_32_R7]];
+   ; ASM: 	mov.64b 	[[R64_R8]], 16;
+   ; ASM: 	st.global.32b	 [[[R64_R8]]], [[R32_R6]];
+   ; ASM: 	return;
+
+    %1:_(p1) = G_CONSTANT i64 0
+    %0:_(<5 x p4>) = G_LOAD %1(p1) :: (load (<5 x p4>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    G_STORE %0(<5 x p4>), %1(p1) :: (store (<5 x p4>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ret
+...
+---
+name:            test_load_store_ptr_vector_global_6elem
+tracksRegLiveness: true
+body:             |
+  bb.1 (%ir-block.0):
+    ; LEGAL-LABEL: name: test_load_store_ptr_vector_global_6elem
+    ; LEGAL: [[C:%[0-9]+]]:_(p1) = G_CONSTANT i64 0
+    ; LEGAL: [[LOAD:%[0-9]+]]:_(<3 x i64>) = G_LOAD [[C]](p1) :: (load (<3 x i64>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: [[UV:%[0-9]+]]:_(i64), [[UV1:%[0-9]+]]:_(i64), [[UV2:%[0-9]+]]:_(i64) = G_UNMERGE_VALUES [[LOAD]](<3 x i64>)
+    ; LEGAL: [[BITCAST:%[0-9]+]]:_(<2 x p4>) = G_BITCAST [[UV]](i64)
+    ; LEGAL: [[BITCAST1:%[0-9]+]]:_(<2 x p4>) = G_BITCAST [[UV1]](i64)
+    ; LEGAL: [[BITCAST2:%[0-9]+]]:_(<2 x p4>) = G_BITCAST [[UV2]](i64)
+    ; LEGAL: [[BITCAST3:%[0-9]+]]:_(i64) = G_BITCAST [[BITCAST]](<2 x p4>)
+    ; LEGAL: [[BITCAST4:%[0-9]+]]:_(i64) = G_BITCAST [[BITCAST1]](<2 x p4>)
+    ; LEGAL: [[BITCAST5:%[0-9]+]]:_(i64) = G_BITCAST [[BITCAST2]](<2 x p4>)
+    ; LEGAL: [[BUILD_VECTOR:%[0-9]+]]:_(<3 x i64>) = G_BUILD_VECTOR [[BITCAST3]](i64), [[BITCAST4]](i64), [[BITCAST5]](i64)
+    ; LEGAL: G_STORE [[BUILD_VECTOR]](<3 x i64>), [[C]](p1) :: (store (<3 x i64>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: ret
+
+    ; ASM-LABEL: void @test_load_store_ptr_vector_global_6elem(
+    ; ASM:   .reg .64b [[R64_R0:%[-a-zA-Z$._0-9]+]];
+    ; ASM:   .reg .v3.64b [[VR3_64_R1:%[-a-zA-Z$._0-9]+]];
+    ; ASM:   mov.64b         [[R64_R0]], 0;
+    ; ASM:   ld.global.v3.64b         [[VR3_64_R1]], [[[R64_R0]]];
+    ; ASM:   st.global.v3.64b         [[[R64_R0]]], [[VR3_64_R1]];
+    ; ASM:   return;
+
+    %1:_(p1) = G_CONSTANT i64 0
+    %0:_(<6 x p4>) = G_LOAD %1(p1) :: (load (<6 x p4>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    G_STORE %0(<6 x p4>), %1(p1) :: (store (<6 x p4>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ret
+...
+---
+name:            test_load_store_ptr_vector_global_7elem
+tracksRegLiveness: true
+body:             |
+  bb.1 (%ir-block.0):
+    ; LEGAL-LABEL: name: test_load_store_ptr_vector_global_7elem
+    ; LEGAL: [[C:%[0-9]+]]:_(p1) = G_CONSTANT i64 0
+    ; LEGAL: [[LOAD:%[0-9]+]]:_(<8 x i32>) = G_LOAD [[C]](p1) :: (load (<8 x i32>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: [[EXTRACT_SUBVECTOR:%[0-9]+]]:_(<7 x i32>) = G_EXTRACT_SUBVECTOR [[LOAD]](<8 x i32>), 0
+    ; LEGAL: [[C1:%[0-9]+]]:_(i32) = G_CONSTANT i32 0
+    ; LEGAL: [[EVEC:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C1]](i32)
+    ; LEGAL: [[C2:%[0-9]+]]:_(i32) = G_CONSTANT i32 1
+    ; LEGAL: [[EVEC1:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C2]](i32)
+    ; LEGAL: [[C3:%[0-9]+]]:_(i32) = G_CONSTANT i32 2
+    ; LEGAL: [[EVEC2:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C3]](i32)
+    ; LEGAL: [[C4:%[0-9]+]]:_(i32) = G_CONSTANT i32 3
+    ; LEGAL: [[EVEC3:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C4]](i32)
+    ; LEGAL: [[C5:%[0-9]+]]:_(i32) = G_CONSTANT i32 4
+    ; LEGAL: [[EVEC4:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C5]](i32)
+    ; LEGAL: [[C6:%[0-9]+]]:_(i32) = G_CONSTANT i32 5
+    ; LEGAL: [[EVEC5:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C6]](i32)
+    ; LEGAL: [[C7:%[0-9]+]]:_(i32) = G_CONSTANT i32 6
+    ; LEGAL: [[EVEC6:%[0-9]+]]:_(i32) = G_EXTRACT_VECTOR_ELT [[EXTRACT_SUBVECTOR]](<7 x i32>), [[C7]](i32)
+    ; LEGAL: [[INTTOPTR:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC]](i32)
+    ; LEGAL: [[INTTOPTR1:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC1]](i32)
+    ; LEGAL: [[INTTOPTR2:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC2]](i32)
+    ; LEGAL: [[INTTOPTR3:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC3]](i32)
+    ; LEGAL: [[INTTOPTR4:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC4]](i32)
+    ; LEGAL: [[INTTOPTR5:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC5]](i32)
+    ; LEGAL: [[INTTOPTR6:%[0-9]+]]:_(p4) = G_INTTOPTR [[EVEC6]](i32)
+    ; LEGAL: [[PTRTOINT:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR]](p4)
+    ; LEGAL: [[PTRTOINT1:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR1]](p4)
+    ; LEGAL: [[PTRTOINT2:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR2]](p4)
+    ; LEGAL: [[PTRTOINT3:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR3]](p4)
+    ; LEGAL: [[BUILD_VECTOR:%[0-9]+]]:_(<4 x i32>) = G_BUILD_VECTOR [[PTRTOINT]](i32), [[PTRTOINT1]](i32), [[PTRTOINT2]](i32), [[PTRTOINT3]](i32)
+    ; LEGAL: G_STORE [[BUILD_VECTOR]](<4 x i32>), [[C]](p1) :: (store (<4 x i32>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ; LEGAL: [[C8:%[0-9]+]]:_(p1) = G_CONSTANT i64 16
+    ; LEGAL: [[PTRTOINT4:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR4]](p4)
+    ; LEGAL: [[PTRTOINT5:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR5]](p4)
+    ; LEGAL: [[PTRTOINT6:%[0-9]+]]:_(i32) = G_PTRTOINT [[INTTOPTR6]](p4)
+    ; LEGAL: [[BUILD_VECTOR1:%[0-9]+]]:_(<3 x i32>) = G_BUILD_VECTOR [[PTRTOINT4]](i32), [[PTRTOINT5]](i32), [[PTRTOINT6]](i32)
+    ; LEGAL: G_STORE [[BUILD_VECTOR1]](<3 x i32>), [[C8]](p1) :: (store (<3 x i32>) into `ptr addrspace(1) null` + 16, align 8, addrspace 1)
+    ; LEGAL: ret
+
+    ; ASM-LABEL: void @test_load_store_ptr_vector_global_7elem(
+    ; ASM: 	.reg .64b [[R64_R0:%[-a-zA-Z$._0-9]+]], [[R64_R4:%[-a-zA-Z$._0-9]+]];
+    ; ASM: 	.reg .v8.32b [[VR8_32_R1:%[-a-zA-Z$._0-9]+]];
+    ; ASM: 	.reg .v3.32b [[VR3_32_R2:%[-a-zA-Z$._0-9]+]];
+    ; ASM: 	.reg .v4.32b [[VR4_32_R3:%[-a-zA-Z$._0-9]+]];
+    ; ASM: 	mov.64b 	[[R64_R0]], 0;
+    ; ASM: 	ld.global.v8.32b	 [[VR8_32_R1]], [[[R64_R0]]];
+    ; ASM: 	extract.4.32b 	[[VR3_32_R2]].x, [[VR8_32_R1]];
+    ; ASM: 	extract.5.32b 	[[VR3_32_R2]].y, [[VR8_32_R1]];
+    ; ASM: 	extract.6.32b 	[[VR3_32_R2]].z, [[VR8_32_R1]];
+    ; ASM: 	mov.64b 	[[VR4_32_R3]].xy, [[VR8_32_R1]].xy;
+    ; ASM: 	mov.64b 	[[VR4_32_R3]].zw, [[VR8_32_R1]].zw;
+    ; ASM: 	st.global.v4.32b	 [[[R64_R0]]], [[VR4_32_R3]];
+    ; ASM: 	mov.64b 	[[R64_R4]], 16;
+    ; ASM: 	st.global.v3.32b	 [[[R64_R4]]], [[VR3_32_R2]];
+    ; ASM: 	return;
+
+    %1:_(p1) = G_CONSTANT i64 0
+    %0:_(<7 x p4>) = G_LOAD %1(p1) :: (load (<7 x p4>) from `ptr addrspace(1) null`, align 8, addrspace 1)
+    G_STORE %0(<7 x p4>), %1(p1) :: (store (<7 x p4>) into `ptr addrspace(1) null`, align 8, addrspace 1)
+    ret
+...

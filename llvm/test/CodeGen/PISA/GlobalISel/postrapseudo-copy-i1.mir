@@ -1,0 +1,63 @@
+# RUN: llc -march=pisa -run-pass=postrapseudos -verify-machineinstrs %s -o -   | FileCheck -check-prefix=PSEUDO %s
+# RUN: llc -march=pisa -start-before=postrapseudos -verify-machineinstrs %s -o - | FileCheck -check-prefix=ASM  %s
+
+--- |
+  target triple = "pisa"
+
+  define i8 @test_i1_8(i8 %a) {
+  entry:
+    ret i8 %a
+  }
+  define i32 @test_i1_32(i32 %a) {
+  entry:
+    ret i32 %a
+  }
+...
+---
+name:            test_i1_8
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1.entry:
+
+    ; PSEUDO-LABEL: name: test_i1_8
+    ; PSEUDO: %0:reg8b = functionParameter_i8 0
+    ; PSEUDO-NEXT: %3:reg16b(i16) = zext_16b_8b_r %0
+    ; PSEUDO-NEXT: %1:pred = ucmp_ne_16b_pri %3(i16), 0
+    ; PSEUDO-NEXT: %4:reg16b(i16) = sel_16_iip %1, 1, 0
+    ; PSEUDO-NEXT: %2:reg8b = trunc_8b_16b_r %4(i16)
+    ; PSEUDO-NEXT: retValue_i8_r %2
+    ; ASM-LABEL: @test_i1_8
+    ; ASM:      zext.16b.8b %h0, %b0;
+    ; ASM-NEXT: ucmp.ne.16b %p0, %h0, 0;
+    ; ASM-NEXT: sel.16b %h1, 1, 0, %p0;
+    ; ASM-NEXT: trunc.8b.16b %b1, %h1;
+    ; ASM-NEXT: return %b1;
+    %0:reg8b = functionParameter_i8 0
+    %1:pred = COPY %0:reg8b
+    %2:reg8b = COPY %1:pred
+    retValue_i8_r %2:reg8b
+...
+---
+name:            test_i1_32
+legalized:       true
+regBankSelected: true
+tracksRegLiveness: true
+body:             |
+  bb.1.entry:
+
+    ; PSEUDO-LABEL: name: test_i1_32
+    ; PSEUDO: %0:reg32b = functionParameter_i32 0
+    ; PSEUDO-NEXT: %1:pred = ucmp_ne_32b_pri %0, 0
+    ; PSEUDO-NEXT: %2:reg32b = sel_32_iip %1, 1, 0
+    ; PSEUDO-NEXT: retValue_i32_r %2
+    ; ASM-LABEL: @test_i1_32
+    ; ASM:      ucmp.ne.32b %p0, %w0, 0;
+    ; ASM-NEXT: sel.32b %w1, 1, 0, %p0;
+    ; ASM-NEXT: return %w1;
+    %0:reg32b = functionParameter_i32 0
+    %1:pred = COPY %0:reg32b
+    %2:reg32b = COPY %1:pred
+    retValue_i32_r %2:reg32b
+...
